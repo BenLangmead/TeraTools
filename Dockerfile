@@ -11,10 +11,24 @@ RUN apt-get update && apt-get install -y \
     cmake \
     python3 \
     python3-pip \
+    python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
+# Create and activate virtual environment
+ENV VIRTUAL_ENV=/opt/venv
+RUN python3 -m venv $VIRTUAL_ENV
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
 # Install pydivsufsort
-RUN pip3 install --no-cache-dir pydivsufsort
+RUN pip install --no-cache-dir pydivsufsort
+
+# Clone, build and install ropebwt3
+RUN git clone https://github.com/lh3/ropebwt3 /tmp/ropebwt3 && \
+    cd /tmp/ropebwt3 && \
+    make && \
+    cp ropebwt3 /usr/local/bin/ && \
+    cd / && \
+    rm -rf /tmp/ropebwt3
 
 # Set working directory
 WORKDIR /app
@@ -38,5 +52,6 @@ CMD ["bash", "-c", "echo 'TeraTools binaries available:' && \
     echo '  TeraMS    - Matching statistics computation' && \
     echo '  TeraMEM   - Maximal Exact Match enumeration' && \
     echo '  TeraIndex - Index construction and querying' && \
+    echo '  ropebwt3  - FM-index construction and searching' && \
     echo '' && \
     echo 'Use: docker run <image> <binary> <args>'"]
