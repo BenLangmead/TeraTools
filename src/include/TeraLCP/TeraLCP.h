@@ -1555,11 +1555,13 @@ class TeraLCP {
         std::cout << "\n";
     }
 
+    // RunInfo holds per-run lengths and run symbols (alphabet codes) in BWT order.
     struct RunInfo {
         std::vector<uint64_t> lengths;
         std::vector<uint64_t> symbols;
     };
 
+    // buildLCPArray reconstructs the full LCP array (BWT order) from PLCP samples and Phi.
     std::vector<uint64_t> buildLCPArray() const {
         std::vector<uint64_t> lcp(totalLen);
         MoveStructureStartTable::IntervalPoint phiPoint{static_cast<uint64_t>(-1), intAtTop[0], 0};
@@ -1572,6 +1574,7 @@ class TeraLCP {
         return lcp;
     }
 
+    // buildRunInfo reconstructs run lengths and run symbols from the stored Psi/F tables.
     RunInfo buildRunInfo() const {
         sdsl::int_vector<> pi, invPi;
         MoveStructureTable LF;

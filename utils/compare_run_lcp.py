@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """
+Author: Ben Langmead with assistance from Codex
+Copyright 2026
+
 Compare run-LCP TSV outputs from TeraTools and the naive lcp.py implementation.
 
 The script runs:

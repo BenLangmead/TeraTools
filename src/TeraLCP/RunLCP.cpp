@@ -1,3 +1,7 @@
+// Author: Ben Langmead with assistance from Codex
+// Copyright 2026
+// Description: Emit per-run LCP lists from a TeraLCP index in TSV format.
+
 #include <fstream>
 #include <iostream>
 #include <string>
