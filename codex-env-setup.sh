@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+# Remember the starting directory
+START_DIR=$(pwd)
+
 echo "Setting up Codex environment for TeraTools..."
 
 # Install build dependencies
@@ -34,16 +37,15 @@ git clone https://github.com/lh3/ropebwt3 /tmp/ropebwt3
 cd /tmp/ropebwt3
 make
 cp ropebwt3 /usr/local/bin/
-cd /
 rm -rf /tmp/ropebwt3
 
-# Build TeraTools
+# Return to starting directory and build TeraTools
+cd "$START_DIR"
 echo "Building TeraTools..."
-cd /app
 make
 
 # Add binaries to PATH
-export PATH="/app/src/TeraLCP:/app/src/TeraMS:/app/src/TeraMEM:/app/src/TeraIndex:$PATH"
+export PATH="$START_DIR/src/TeraLCP:$START_DIR/src/TeraMS:$START_DIR/src/TeraMEM:$START_DIR/src/TeraIndex:$PATH"
 
 echo ""
 echo "Setup complete! Available binaries:"
@@ -54,7 +56,7 @@ echo "  TeraIndex - Index construction and querying"
 echo "  ropebwt3  - FM-index construction and searching"
 echo ""
 echo "Note: To persist the Python virtual environment and PATH changes,"
-echo "add the following to your shell profile:"
+echo "add the following to your shell profile (adjust paths as needed):"
 echo "  export VIRTUAL_ENV=/opt/venv"
 echo "  export PATH=\"\$VIRTUAL_ENV/bin:\$PATH\""
-echo "  export PATH=\"/app/src/TeraLCP:/app/src/TeraMS:/app/src/TeraMEM:/app/src/TeraIndex:\$PATH\""
+echo "  export PATH=\"$START_DIR/src/TeraLCP:$START_DIR/src/TeraMS:$START_DIR/src/TeraMEM:$START_DIR/src/TeraIndex:\$PATH\""
