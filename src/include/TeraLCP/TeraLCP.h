@@ -8,6 +8,8 @@
 #include<omp.h>
 #include<atomic>
 #include<mutex>
+#include<unordered_map>
+#include<stdexcept>
 
 static constexpr const char* lcp_index_extension = ".lcp_index";
 
@@ -1551,6 +1553,92 @@ class TeraLCP {
             phiPoint.interval += (phiPoint.offset == 0);
         }
         std::cout << "\n";
+    }
+
+    // RunInfo holds per-run lengths and run symbols (alphabet codes) in BWT order.
+    struct RunInfo {
+        std::vector<uint64_t> lengths;
+        std::vector<uint64_t> symbols;
+    };
+
+    // buildLCPArray reconstructs the full LCP array (BWT order) from PLCP samples and Phi.
+    std::vector<uint64_t> buildLCPArray() const {
+        std::vector<uint64_t> lcp(totalLen);
+        MoveStructureStartTable::IntervalPoint phiPoint{static_cast<uint64_t>(-1), intAtTop[0], 0};
+        phiPoint.offset = Phi.data.get<2>(phiPoint.interval) - 1;
+        phiPoint = Phi.map(phiPoint);
+        for (uint64_t i = 0; i < totalLen; ++i) {
+            lcp[totalLen - 1 - i] = PLCPsamples[phiPoint.interval] - phiPoint.offset;
+            phiPoint = Phi.map(phiPoint);
+        }
+        return lcp;
+    }
+
+    // buildRunInfo reconstructs run lengths and run symbols from the stored Psi/F tables.
+    RunInfo buildRunInfo() const {
+        sdsl::int_vector<> pi, invPi;
+        MoveStructureTable LF;
+        std::tie(LF, pi, invPi) = Psi.invertAndRetPiInvPi();
+
+        const uint64_t numRuns = LF.data.size();
+        std::vector<uint64_t> runLengths(numRuns);
+        for (uint64_t i = 0; i < numRuns; ++i) {
+            runLengths[i] = LF.get_length(i);
+        }
+
+        auto pointToInt = [numRuns](MoveStructureTable::IntervalPoint a) -> uint64_t {
+            return a.interval + a.offset * numRuns;
+        };
+
+        uint64_t numSequences = 0;
+        while (numSequences < numRuns && F[numSequences] == 0) {
+            ++numSequences;
+        }
+        if (numSequences == 0 || numSequences == numRuns) {
+            throw std::runtime_error("Failed to infer number of sequences from F.");
+        }
+
+        std::vector<uint64_t> rlbwt(numRuns, 0);
+        std::unordered_map<uint64_t, uint64_t> currentStarts;
+
+        MoveStructureTable::IntervalPoint p{static_cast<uint64_t>(-1), 0, numSequences}, start;
+        while (p.interval < numRuns && p.offset >= LF.data.get<2>(p.interval)) {
+            p.offset -= LF.data.get<2>(p.interval++);
+        }
+        start = p;
+        for (uint64_t i = numSequences; i < numRuns; ++i) {
+            while (p.interval < numRuns && p.offset >= LF.data.get<2>(p.interval)) {
+                p.offset -= LF.data.get<2>(p.interval++);
+            }
+            if (F[i] != F[i - 1]) {
+                currentStarts[pointToInt(p)] = F[i];
+            }
+            p.offset += Psi.data.get<2>(i);
+        }
+
+        for (uint64_t i = 0; i < numRuns; ++i) {
+            auto lfPoint = LF.map({static_cast<uint64_t>(-1), i, 0});
+            if (lfPoint.interval < start.interval || (lfPoint.interval == start.interval && lfPoint.offset < start.offset)) {
+                rlbwt[i] = 0;
+            } else {
+                auto key = pointToInt(lfPoint);
+                if (currentStarts.find(key) == currentStarts.end()) {
+                    throw std::runtime_error("Failed to resolve BWT run character.");
+                }
+                rlbwt[i] = currentStarts[key];
+                currentStarts.erase(key);
+            }
+            lfPoint.offset += LF.data.get<2>(i);
+            while (lfPoint.interval < numRuns && lfPoint.offset >= LF.data.get<2>(lfPoint.interval)) {
+                lfPoint.offset -= LF.data.get<2>(lfPoint.interval++);
+            }
+            if (lfPoint.interval == numRuns && lfPoint.offset != 0) {
+                throw std::runtime_error("Invalid LF mapping while reconstructing BWT runs.");
+            }
+            currentStarts[pointToInt(lfPoint)] = rlbwt[i];
+        }
+
+        return {std::move(runLengths), std::move(rlbwt)};
     }
 
     void printPhiAndLCP(const sdsl::int_vector<>& PLCPsamples) const {
