@@ -61,6 +61,26 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def repo_root() -> str:
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+
+
+def resolve_path(path: str, root: str) -> str:
+    if os.path.isabs(path):
+        return path
+    candidate = os.path.join(root, path)
+    if os.path.exists(candidate):
+        return os.path.abspath(candidate)
+    return os.path.abspath(path)
+
+
+def resolve_python(root: str) -> str:
+    venv_python = os.path.join(os.sep, "opt", "venv", "bin", "python")
+    if os.path.exists(venv_python):
+        return venv_python
+    return sys.executable
+
+
 def load_tsv(path: str, is_naive: bool) -> List[RunRecord]:
     records: List[RunRecord] = []
     with open(path, newline="") as handle:
@@ -113,9 +133,24 @@ def stats_for(records: Iterable[RunRecord]) -> dict[str, float]:
 
 
 def compare_file(path: str, run_lcp: str, lcp_py: str, keep_temp: bool) -> int:
-    if not os.path.exists(path):
-        print(f"Error: FASTA file not found: {path}", file=sys.stderr)
+    root = repo_root()
+    python_exec = resolve_python(root)
+    resolved_input = resolve_path(path, root)
+    if not os.path.exists(resolved_input):
+        print(f"Error: FASTA file not found: {resolved_input}", file=sys.stderr)
         return 1
+    resolved_run_lcp = resolve_path(run_lcp, root)
+    resolved_lcp_py = resolve_path(lcp_py, root)
+    if not os.path.exists(resolved_run_lcp):
+        print(f"Error: RunLCP runner not found: {resolved_run_lcp}", file=sys.stderr)
+        return 1
+    if not os.path.exists(resolved_lcp_py):
+        print(f"Error: lcp.py not found: {resolved_lcp_py}", file=sys.stderr)
+        return 1
+
+    ropebwt3_path = os.path.join(root, "ropebwt3", "ropebwt3")
+    teralcp_path = os.path.join(root, "src", "TeraLCP", "TeraLCP")
+    runlcp_path = os.path.join(root, "src", "TeraLCP", "RunLCP")
 
     temp_dir = tempfile.mkdtemp(prefix="tera_compare_lcp_")
     try:
@@ -123,11 +158,34 @@ def compare_file(path: str, run_lcp: str, lcp_py: str, keep_temp: bool) -> int:
         naive_out = os.path.join(temp_dir, "naive.tsv")
 
         with open(tera_out, "w", encoding="utf-8") as handle:
-            subprocess.run([run_lcp, "--fasta", path, "--header"], check=True, stdout=handle)
+            subprocess.run(
+                [
+                    python_exec,
+                    resolved_run_lcp,
+                    "--fasta",
+                    resolved_input,
+                    "--header",
+                    "--ropebwt3",
+                    ropebwt3_path,
+                    "--teralcp",
+                    teralcp_path,
+                    "--runlcp",
+                    runlcp_path,
+                ],
+                check=True,
+                stdout=handle,
+            )
 
         with open(naive_out, "w", encoding="utf-8") as handle:
+            naive_cmd = [
+                python_exec,
+                resolved_lcp_py,
+                "--fasta",
+                resolved_input,
+                "--with-rc",
+            ]
             subprocess.run(
-                [lcp_py, "--fasta", path, "--separators"],
+                naive_cmd,
                 check=True,
                 stdout=handle,
             )
@@ -143,6 +201,7 @@ def compare_file(path: str, run_lcp: str, lcp_py: str, keep_temp: bool) -> int:
             naive_stats = stats_for(naive_records)
             print(f"  TeraTools runs: {tera_stats['total_runs']}, chars: {tera_stats['total_chars']}, avg LCP: {tera_stats['avg_lcp']:.3f}")
             print(f"  Naive runs:     {naive_stats['total_runs']}, chars: {naive_stats['total_chars']}, avg LCP: {naive_stats['avg_lcp']:.3f}")
+            return 1
     except (RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

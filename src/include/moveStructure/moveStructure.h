@@ -234,7 +234,7 @@ struct MoveStructureTable {
     }
 
     std::tuple<MoveStructureTable, sdsl::int_vector<>, sdsl::int_vector<>>
-    invertAndRetPiInvPi() {
+    invertAndRetPiInvPi() const {
         const uint64_t numIntervals = data.size();
         uint64_t maxRunLen = 0, maxOffset = 0;
         sdsl::int_vector<> pi(numIntervals, 0, sdsl::bits::hi(numIntervals - 1) + 1);
@@ -515,7 +515,7 @@ struct MoveStructureStartTable {
     }
 
     std::tuple<MoveStructureStartTable, sdsl::int_vector<>, sdsl::int_vector<>>
-    invertAndRetPiInvPi() {
+    invertAndRetPiInvPi() const {
         const uint64_t numIntervals = data.size() - 1;
         uint64_t maxOffset = 0;
         sdsl::int_vector<> pi(numIntervals, 0, sdsl::bits::hi(numIntervals - 1) + 1);

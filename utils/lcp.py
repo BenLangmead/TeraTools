@@ -133,7 +133,9 @@ def load_fasta(path: str) -> list:
                         sequences.append(seq)
                 current = []
             else:
-                current.append(line)
+                seq_line = line.strip().replace(" ", "")
+                if seq_line:
+                    current.append(seq_line)
         if current:
             seq = "".join(current).strip().replace(" ", "")
             if seq:
