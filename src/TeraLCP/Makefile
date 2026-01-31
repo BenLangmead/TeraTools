@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-all: TeraLCP
+all: TeraLCP RunLCP
 
 .PHONY: all clean test testIndexOnly
 
@@ -41,7 +41,7 @@ ifneq ($(omp),0)
 endif
 
 clean:
-	-rm TeraLCP
+	-rm TeraLCP RunLCP
 
 testIndexOnly: TeraLCP
 	set -e && \
@@ -64,4 +64,7 @@ $(libdir) $(incdir):
 	make -C ../thirdparty/
 
 TeraLCP: TeraLCP.cpp $(lcpHeads) $(objs) $(libdir) $(incdir)
+	$(CXX) $(cppflags) $(incs) -L$(libdir) $(objs) $< -o $@ $(libs)
+
+RunLCP: RunLCP.cpp $(lcpHeads) $(objs) $(libdir) $(incdir)
 	$(CXX) $(cppflags) $(incs) -L$(libdir) $(objs) $< -o $@ $(libs)
