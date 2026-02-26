@@ -14,19 +14,24 @@ namespace {
 struct Options {
     std::string inputFile;
     std::string outputFile;
+    std::string mode = "top";
     bool header = false;
+    bool thresholdsBoundary = false;
 };
 
 void printUsage() {
     std::cout
         << "RunLCP emits per-run LCP lists using a TeraLCP index.\n"
         << "\n"
-        << "Usage: RunLCP -i <input.lcp_index> [-o output.tsv] [--header]\n"
+        << "Usage: RunLCP -i <input.lcp_index> [-o output.tsv] [--mode MODE] [--header] [--boundary]\n"
         << "\n"
         << "Options:\n"
         << "  -i FILE       Input LCP index file produced by TeraLCP\n"
         << "  -o FILE       Output TSV file (default: stdout)\n"
-        << "  --header      Print a header row\n"
+        << "  --mode MODE   Output mode: all|top|min-top|min-bot|min-range|sample|thresholds [top]\n"
+        << "                For thresholds: writes base.thr and base.thr_pos (requires -o as base path)\n"
+        << "  --boundary    (thresholds only) Prefer boundary positions (offset 0 or len) when minimal\n"
+        << "  --header      Print a header row (always on for writeRunLCP modes)\n"
         << "  -h, --help    Show this help message\n";
 }
 
@@ -46,7 +51,10 @@ Options parseOptions(int argc, const char* argv[]) {
 
     options.inputFile = getArg("-i", true, true);
     options.outputFile = getArg("-o", false, true);
+    options.mode = getArg("--mode", false, true);
+    if (options.mode.empty()) options.mode = "top";
     options.header = (getArg("--header", false, false) != "");
+    options.thresholdsBoundary = (getArg("--boundary", false, false) != "");
 
     for (int i = 0; i < argc; ++i) {
         if (!used[i]) {
@@ -63,21 +71,29 @@ Options parseOptions(int argc, const char* argv[]) {
     return options;
 }
 
-std::string symbolToString(uint64_t symbol) {
-    static const char* alphabet = "$ACGTN";
-    if (symbol < 6) {
-        return std::string(1, alphabet[symbol]);
-    }
-    return std::to_string(symbol);
-}
 }  // namespace
 
 int main(int argc, const char* argv[]) {
     Options options = parseOptions(argc, argv);
 
+    TeraLCP::RunLCPMode mode;
+    try {
+        mode = TeraLCP::parseRunLCPMode(options.mode);
+    } catch (const std::exception& e) {
+        std::cerr << "ERROR: " << e.what() << '\n';
+        return 1;
+    }
+
     TeraLCP index(options.inputFile);
-    auto lcp = index.buildLCPArray();
-    auto runInfo = index.buildRunInfo();
+
+    if (mode == TeraLCP::RunLCPMode::thresholds) {
+        if (options.outputFile.empty()) {
+            std::cerr << "ERROR: thresholds mode requires -o BASE (writes BASE.thr and BASE.thr_pos)\n";
+            return 1;
+        }
+        index.writeThresholds(options.outputFile, options.thresholdsBoundary);
+        return 0;
+    }
 
     std::ostream* outPtr = &std::cout;
     std::ofstream outFile;
@@ -91,34 +107,7 @@ int main(int argc, const char* argv[]) {
     }
     std::ostream& out = *outPtr;
 
-    if (options.header) {
-        out << "run_id\trun_offset\trun_length\tchar\tlcp_values\n";
-    }
-
-    uint64_t runOffset = 0;
-    const uint64_t runCount = runInfo.lengths.size();
-    for (uint64_t runId = 0; runId < runCount; ++runId) {
-        uint64_t runLength = runInfo.lengths[runId];
-        uint64_t start = runOffset;
-        uint64_t end = start + runLength;
-        if (end > lcp.size()) {
-            std::cerr << "ERROR: run length exceeds LCP array length.\n";
-            return 1;
-        }
-        out << runId << '\t'
-            << runOffset << '\t'
-            << runLength << '\t'
-            << symbolToString(runInfo.symbols[runId]) << '\t';
-
-        for (uint64_t i = start; i < end; ++i) {
-            if (i != start) {
-                out << ',';
-            }
-            out << lcp[i];
-        }
-        out << '\n';
-        runOffset = end;
-    }
+    index.writeRunLCP(out, mode);
 
     return 0;
 }
