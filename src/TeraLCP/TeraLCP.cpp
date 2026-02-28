@@ -19,6 +19,19 @@ void printUsage() {
         "  Output:\n"
         "    -oindex     FILE                            optional       Output constructed index to FILE" << lcp_index_extension << "\n"
         "    -orlcp      FILE                            optional       Output (position, minLCP) pairs per run to FILE" << rlcp_extension << "\n"
+        "    -otsv       FILE                            optional       Output TSV per BWT run in BWT order to FILE\n"
+        "    -tsvmode    MODE                            optional       Mode for -otsv: all|top|min-top|min-bot|min-range|sample|thresholds [top]\n"
+        "                                                              Modes:\n"
+        "                                                                all         : Outputs all LCPs for each run (in reverse run order).\n"
+        "                                                                top         : Outputs only the maximal LCP for each run (default).\n"
+        "                                                                min-top     : Outputs top-most minimal LCPs per run.\n"
+        "                                                                min-bot     : Outputs bottom-most minimal LCPs per run.\n"
+        "                                                                min-range   : Outputs top-most and bottom-most LCPs per run.\n"
+        "                                                                sample      : Outputs top, min, and a sample of interior LCPs sufficient\n"
+        "                                                                              for matching statistics (in reverse run order).\n"
+        "                                                                thresholds  : Outputs MONI-style .thr and .thr_pos files\n"
+        "                                                                              (-otsv specifies base path).\n"
+        "    -threshbound                                optional       (thresholds only) Prefer row boundarues (offsets 0 or len) when minimal\n"
         "\n"
         "  Behavior:\n"
         "    -p          INT                             optional       Limit the program to (nonnegative) INT threads. By default uses maximum available. Maximum on this hardware is " << omp_get_max_threads() << "\n"
@@ -41,9 +54,10 @@ void printUsage() {
 
 struct options{
     enum inputFormat { text, bwt, rlbwt, fmd, lcp_index }inputFormat;
-    std::string inputFile, tempFile, oindex="", orlcp="";
+    std::string inputFile, tempFile, oindex="", orlcp="", otsv="", tsvmode="top";
     unsigned numThreads = omp_get_max_threads();
     bool mmap;
+    bool threshbound = false;
     #ifndef BENCHFASTONLY
     verbosity v = TIME;
     #endif
@@ -79,6 +93,10 @@ void processOptions(const int argc, const char* argv[]) {
     o.orlcp = getArg("-orlcp", false, true);
     if (o.orlcp != "")
         o.orlcp += rlcp_extension;
+    o.otsv = getArg("-otsv", false, true);
+    o.tsvmode = getArg("-tsvmode", false, true);
+    if (o.tsvmode == "") o.tsvmode = "top";
+    o.threshbound = (getArg("-threshbound", false, false) != "");
     s = getArg("-p", false, true);
     if (s != "")
         o.numThreads = std::stoul(s);
@@ -97,7 +115,7 @@ void processOptions(const int argc, const char* argv[]) {
     }
 #else
     s = getArg("-bench", false, false);
-    if (o.oindex == "" && o.orlcp == "" && s == "") {
+    if (o.oindex == "" && o.orlcp == "" && o.otsv == "" && s == "") {
         std::cout << "No output formats passed. If you want to construct the index but not output anything (for benchmarking purposes, typically), then '-bench' must be explictly passed.\n";
         exit(1);
     }
@@ -112,6 +130,7 @@ void processOptions(const int argc, const char* argv[]) {
     testOutFile(o.tempFile);
     testOutFile(o.oindex);
     testOutFile(o.orlcp);
+    testOutFile(o.otsv);
 }
 
 int main(const int argc, const char*argv[]) {
@@ -195,6 +214,35 @@ int main(const int argc, const char*argv[]) {
         if (o.v >= TIME) { Timer.stop(); } //sequential output min LCP per run
         #ifndef BENCHFASTONLY
         if (o.v >= TIME) { Timer.stop(); } //min LCP per run computation
+        #endif
+    }
+
+    // Handle TSV / MONI-style thresholds output
+    if (o.otsv != "") {
+        #ifndef BENCHFASTONLY
+        if (o.v >= TIME) { Timer.start("run LCP / thresholds output"); }
+        #endif
+        TeraLCP::RunLCPMode mode = TeraLCP::RunLCPMode::top;
+        try {
+            mode = TeraLCP::parseRunLCPMode(o.tsvmode);
+        } catch (const std::exception& e) {
+            std::cerr << "ERROR: " << e.what() << std::endl;
+            exit(1);
+        }
+        if (mode == TeraLCP::RunLCPMode::thresholds) {
+            std::string base = o.otsv;
+            ourIndex.writeThresholds(base, o.threshbound);
+        } else {
+            std::ofstream runLcpOut(o.otsv);
+            if (!runLcpOut.is_open()) {
+                std::cerr << "ERROR: File '" << o.otsv << "' failed to open for writing!\n";
+                exit(1);
+            }
+            ourIndex.writeRunLCP(runLcpOut, mode);
+            runLcpOut.close();
+        }
+        #ifndef BENCHFASTONLY
+        if (o.v >= TIME) { Timer.stop(); } //run LCP / thresholds output
         #endif
     }
 
