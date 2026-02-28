@@ -1564,28 +1564,37 @@ class TeraLCP {
     }
 
     /**
-     * Writes LCP information to a TSV, one row per BWT run, in BWT order.  The
-     * exact LCP summary output is determimed by the 'mode' parameters, which
-     * could be any of the modes listed above in the enum.
+     * Writes LCP information to a TSV, one row per BWT run, in either BWT
+     * order or reverse BWT order, depending on the mode.  The exact output is
+     * determimed by the 'mode' parameters, which could be any of the modes
+     * listed above in the enum.
      *
      * This is non-destructive: F, Psi, Phi, PLCPsamples, and intAtTop are all
-     * preserved.
+     * preserved.  There may be opportunities to reduce RAM.
      *
      * The traversal itself is implemented in phiWalkLCP, a helper function
      * defined below.
+     *
+     * TODO: Investigate whether we can output all modes in forward BWT order,
+     * e.g. by using inverse-Phi.  If not, then possibly add the ability to
+     * write to a temporary file first, then print it in forward order by
+     * reading the file in reverse.  That last technique is already used for
+     * the thresholds mode, but it's not implemented for all or sample modes.
      */
     void writeRunLCP(std::ostream& out, RunLCPMode mode = RunLCPMode::top) const {
         const uint64_t runs = F.size();
         if (runs == 0) return;
 
-        // Phase 1 (parallel): for each Phi interval h, walk ϕ to find:
+        // Phase 1: for each Phi interval h, walk ϕ to find:
         //   prevRunIntAtTop[h] – Phi interval index of run (h's BWT-predecessor)
         //   thisRunLength[h]   – length of that predecessor run
         // The top LCP of Phi interval h is PLCPsamples[h] directly.
         sdsl::int_vector<> prevRunIntAtTop(runs, 0, sdsl::bits::hi(runs - 1) + 1);
         sdsl::int_vector<> thisRunLength(runs, 0, sdsl::bits::hi(totalLen) + 1);
 
-        #pragma omp parallel for schedule(dynamic, 1)
+        // This pragma causes OOMs even on relatively small inputs, despite
+        // there being almost no memory used here.  TODO: investigate
+        // #pragma omp parallel for schedule(dynamic, 1)
         for (uint64_t run = 0; run < runs; ++run) {
             MoveStructureStartTable::IntervalPoint p = {Phi.data.get<2>(run), run, 0};
             uint64_t runLen = 0;
@@ -1597,7 +1606,8 @@ class TeraLCP {
             thisRunLength[run]   = runLen;
         }
 
-        // Phase 2 (sequential BWT-order chain): collect (length, phi_interval) per run.
+        // Phase 2 (sequential BWT-order chain): collect (length, phi_interval)
+        // per run.
         std::vector<std::pair<uint64_t,uint64_t>> reversedRows; // (length, phi_interval_of_run)
         reversedRows.reserve(runs);
         uint64_t curr = intAtTop[0];
@@ -1613,14 +1623,6 @@ class TeraLCP {
         runStarts[0] = 0;
         for (uint64_t r = 0; r < runs; ++r)
             runStarts[r + 1] = runStarts[r] + reversedRows[r].first;
-
-        // For the 'all' and 'sample' modes, we really do want to see and
-        // possibly report all the LCPs, so we first fill lcpArr via a Phi walk
-        std::vector<uint64_t> lcpArr;
-        if (mode == RunLCPMode::all || mode == RunLCPMode::sample) {
-            lcpArr.resize(totalLen);
-            phiWalkLCP([&lcpArr](uint64_t pos, uint64_t val) { lcpArr[pos] = val; });
-        }
 
         // For min modes: accumulate per-run state during Phi walk (no full LCP array)
         struct RunMinState { uint64_t minLCP = static_cast<uint64_t>(-1); uint64_t firstOff = 0; uint64_t lastOff = 0; };
@@ -1658,17 +1660,28 @@ class TeraLCP {
         switch (mode) {
         case RunLCPMode::all: {
             out << "id\tlength\tlcp_values\n";
-            uint64_t runStart = 0;
-            for (uint64_t bwtRun = 0; bwtRun < runs; ++bwtRun) {
-                uint64_t len = reversedRows[bwtRun].first;
-                out << bwtRun << '\t' << len << '\t';
-                for (uint64_t j = 0; j < len; ++j) {
-                    if (j > 0) out << ',';
-                    out << lcpArr[runStart + j];
+            uint64_t r = runs - 1, count = 0;
+            uint64_t runLen = reversedRows[r].first;
+            bool firstInRun = true;
+            phiWalkLCP([&](uint64_t /*pos*/, uint64_t val) {
+                if (firstInRun) {
+                    out << r << '\t' << runLen << '\t' << val;
+                    firstInRun = false;
+                    count = 1;
+                } else {
+                    out << ',' << val;
+                    ++count;
                 }
-                out << '\n';
-                runStart += len;
-            }
+                if (count == runLen) {
+                    out << '\n';
+                    if (r > 0) {
+                        --r;
+                        runLen = reversedRows[r].first;
+                        firstInRun = true;
+                        count = 0;
+                    }
+                }
+            });
             break;
         }
         case RunLCPMode::top: {
@@ -1706,31 +1719,40 @@ class TeraLCP {
             std::vector<uint64_t> topLCPs(runs);
             for (uint64_t bwtRun = 0; bwtRun < runs; ++bwtRun)
                 topLCPs[bwtRun] = PLCPsamples[reversedRows[bwtRun].second];
-            uint64_t runStart = 0;
-            for (uint64_t bwtRun = 0; bwtRun < runs; ++bwtRun) {
-                uint64_t len = reversedRows[bwtRun].first;
-                uint64_t topLCP = topLCPs[bwtRun];
-                uint64_t nextTop = (bwtRun + 1 < runs) ? topLCPs[bwtRun + 1] : 0;
-                uint64_t threshold = std::max(topLCP, nextTop);
-                uint64_t minLCP = static_cast<uint64_t>(-1);
-                for (uint64_t j = 0; j < len; ++j) {
-                    uint64_t v = lcpArr[runStart + j];
-                    if (v < minLCP) minLCP = v;
-                }
-                if (minLCP == static_cast<uint64_t>(-1)) minLCP = 0;
-                out << bwtRun << '\t' << len << '\t' << topLCP << '\t' << minLCP << '\t';
-                bool first = true;
-                for (uint64_t j = 1; j < len; ++j) {
-                    uint64_t v = lcpArr[runStart + j];
-                    if (v < threshold) {
-                        if (!first) out << ';';
-                        out << j << ',' << v;
-                        first = false;
+            uint64_t r = runs - 1;
+            std::vector<uint64_t> runLcps;
+            runLcps.reserve(reversedRows[r].first);
+            phiWalkLCP([&](uint64_t /*pos*/, uint64_t val) {
+                runLcps.push_back(val);
+                if (runLcps.size() == reversedRows[r].first) {
+                    std::reverse(runLcps.begin(), runLcps.end());
+                    uint64_t len = runLcps.size();
+                    uint64_t topLCP = topLCPs[r];
+                    uint64_t nextTop = (r + 1 < runs) ? topLCPs[r + 1] : 0;
+                    uint64_t threshold = std::max(topLCP, nextTop);
+                    uint64_t minLCP = static_cast<uint64_t>(-1);
+                    for (uint64_t j = 0; j < len; ++j) {
+                        if (runLcps[j] < minLCP) minLCP = runLcps[j];
+                    }
+                    if (minLCP == static_cast<uint64_t>(-1)) minLCP = 0;
+                    out << r << '\t' << len << '\t' << topLCP << '\t' << minLCP << '\t';
+                    bool first = true;
+                    for (uint64_t j = 1; j < len; ++j) {
+                        uint64_t v = runLcps[j];
+                        if (v < threshold) {
+                            if (!first) out << ';';
+                            out << j << ',' << v;
+                            first = false;
+                        }
+                    }
+                    out << '\n';
+                    runLcps.clear();
+                    if (r > 0) {
+                        --r;
+                        runLcps.reserve(reversedRows[r].first);
                     }
                 }
-                out << '\n';
-                runStart += len;
-            }
+            });
             break;
         }
         }
@@ -1741,17 +1763,16 @@ class TeraLCP {
      * the provided basePath (without extension). Output files will be
      * basePath.thr and basePath.thr_pos.
      *
-     * For each run i, writes the minimal LCP value in [l, r+1] in the .thr
-     * file, and its position in the .thr_pos file. For a character's first
-     * occurrence, writes 0 as the minimum LCP.
+     * Per thr_spec: for each run i with character c, thr[i] is the minimum LCP
+     * value in the gap between the previous run of c and run i. thr_pos[i] is
+     * the BWT row index where that minimum was achieved (can be anywhere).
+     * First-ever occurrence of c: writes 0,0.
      *
-     * If boundaryMode is true, prefers boundary positions (offset 0 or len)
-     * when they are minimal; otherwise, uses the first minimum within the run
-     * ("min-top" behavior).
+     * boundaryMode: when true, prefer thr_pos at the top of a run (subject to
+     * correctness: thr_pos in [earliest_min_pos, latest_min_pos]).
      *
-     * Uses phiWalkLCP for the LCP traversal, requiring only O(1) in-memory
-     * state. Creates a temporary file basePath.thr_tmp (which is removed
-     * after writing). First occurrences are tracked by an O(sigma) map.
+     * Uses phiWalkLCP for the LCP traversal. Creates a temporary file
+     * basePath.thr_tmp (which is removed after writing).
      */
     void writeThresholds(const std::string& basePath, bool boundaryMode = false) const {
         constexpr size_t THRBYTES = 5;
@@ -1765,14 +1786,11 @@ class TeraLCP {
         if (symbols.size() != runs || runLen.size() != runs)
             throw std::runtime_error("writeThresholds: run info size mismatch");
 
-        // Needed so we can track when we are moving between runs
         std::vector<uint64_t> runStarts(runs + 1);
         runStarts[0] = 0;
         for (uint64_t r = 0; r < runs; ++r)
             runStarts[r + 1] = runStarts[r] + runLen[r];
 
-        // Needed so we can write the needed 0,0 output in the .thr and
-        // .thr_pos files for the first occurrence of each character
         std::unordered_map<uint64_t, uint64_t> firstOccurrence;
         for (uint64_t i = 0; i < runs; ++i) {
             uint64_t c = symbols[i];
@@ -1780,59 +1798,83 @@ class TeraLCP {
                 firstOccurrence[c] = i;
         }
 
-        // Because we're following Phi, we're computing thresholds in reverse order
+        const uint64_t sentinel = static_cast<uint64_t>(-1);
+        // prevRunOfC[i] = previous run index with same character as run i (or
+        // sentinel if first run of that character)
+        std::vector<uint64_t> prevRunOfC(runs, sentinel);
+        std::unordered_map<uint64_t, uint64_t> lastSeen;
+        for (uint64_t i = 0; i < runs; ++i) {
+            uint64_t c = symbols[i];
+            auto it = lastSeen.find(c);
+            if (it != lastSeen.end())
+                prevRunOfC[i] = it->second;
+            lastSeen[c] = i;
+        }
+
+        // Per-run accumulators. Gap is [runStarts[prev+1], runStarts[r]] (includes
+        // current run top; one more offset than strict prior-row-only).
+        std::vector<uint64_t> minInGap(runs, sentinel);
+        std::vector<uint64_t> earliestMinPos(runs, 0);
+        std::vector<uint64_t> latestMinPos(runs, 0);
+
         std::string tmpPath = basePath + ".thr_tmp";
         std::ofstream tmpOut(tmpPath, std::ios::binary);
         if (!tmpOut.is_open())
             throw std::runtime_error("writeThresholds: failed to open temp file '" + tmpPath + "'");
 
-        uint64_t r = runs - 1;
-        uint64_t curMinLCP = static_cast<uint64_t>(-1), curMinPos = 0;
-        uint64_t nextMinLCP = static_cast<uint64_t>(-1), nextMinPos = 0;
+        char buf[RECORDBYTES];
 
-        // The callback code in this block is what accepts the LCPs values in
-        // reverse order from phiWalkLCP and determines the per-run thresholds
-        // as we reverse-walk
+        // Pass 1: accumulate min/pos for every run over full phi walk (ensures we
+        // consider the first element of the current run at runStarts[ri]).
         phiWalkLCP([&](uint64_t pos, uint64_t val) {
-            while (r > 0 && pos < runStarts[r]) {
-                char buf[RECORDBYTES];
-                uint64_t thrVal = (curMinLCP == static_cast<uint64_t>(-1)) ? 0 : curMinLCP;
-                std::memcpy(buf, &thrVal, THRBYTES);
-                std::memcpy(buf + THRBYTES, &curMinPos, THRBYTES);
-                tmpOut.write(buf, RECORDBYTES);
-                curMinLCP = nextMinLCP;
-                curMinPos = nextMinPos;
-                nextMinLCP = static_cast<uint64_t>(-1);
-                nextMinPos = 0;
-                --r;
-            }
-            uint64_t j = pos - runStarts[r];
-            uint64_t len = runStarts[r + 1] - runStarts[r];
-            bool include = boundaryMode ? true : (j < len);
-            if (include) {
-                if (val < curMinLCP) {
-                    curMinLCP = val;
-                    curMinPos = pos;
-                } else if (val == curMinLCP && pos < curMinPos) {
-                    curMinPos = pos;
-                }
-            }
-            if (boundaryMode && r > 0 && pos == runStarts[r]) {
-                if (val < nextMinLCP) {
-                    nextMinLCP = val;
-                    nextMinPos = pos;
-                } else if (val == nextMinLCP && pos < nextMinPos) {
-                    nextMinPos = pos;
+            for (uint64_t ri = 0; ri < runs; ++ri) {
+                if (ri == firstOccurrence[symbols[ri]]) continue;
+                uint64_t prev = prevRunOfC[ri];
+                if (prev == sentinel) continue;
+                uint64_t gapStart = runStarts[prev + 1];
+                uint64_t gapEnd = runStarts[ri];  // includes first element of current run
+                if (pos < gapStart || pos > gapEnd) continue;
+                if (val < minInGap[ri] || minInGap[ri] == sentinel) {
+                    minInGap[ri] = val;
+                    earliestMinPos[ri] = latestMinPos[ri] = pos;
+                } else if (val == minInGap[ri]) {
+                    if (pos < earliestMinPos[ri]) earliestMinPos[ri] = pos;
+                    if (pos > latestMinPos[ri]) latestMinPos[ri] = pos;
                 }
             }
         });
 
-        // Write final threshold value to temp file
-        char buf[RECORDBYTES];
-        uint64_t thrVal = (curMinLCP == static_cast<uint64_t>(-1)) ? 0 : curMinLCP;
-        std::memcpy(buf, &thrVal, THRBYTES);
-        std::memcpy(buf + THRBYTES, &curMinPos, THRBYTES);
-        tmpOut.write(buf, RECORDBYTES);
+        // Pass 2: output in reverse run order (runs-1 down to 0)
+        for (uint64_t r = runs; r-- > 0;) {
+            uint64_t c = symbols[r];
+            uint64_t thrVal, thrPosVal;
+            if (r == firstOccurrence[c]) {
+                thrVal = thrPosVal = 0;
+            } else {
+                if (minInGap[r] == sentinel) {
+                    thrVal = 0;
+                    thrPosVal = 0;
+                } else {
+                    thrVal = minInGap[r];
+                    if (boundaryMode) {
+                        thrPosVal = earliestMinPos[r];
+                        for (uint64_t k = 0; k < runs && runStarts[k] <= latestMinPos[r]; ++k) {
+                            uint64_t p = runStarts[k];
+                            if (p >= earliestMinPos[r] && p <= latestMinPos[r]) {
+                                thrPosVal = p;
+                                break;
+                            }
+                        }
+                    } else {
+                        thrPosVal = earliestMinPos[r];
+                    }
+                }
+            }
+            std::memcpy(buf, &thrVal, THRBYTES);
+            std::memcpy(buf + THRBYTES, &thrPosVal, THRBYTES);
+            tmpOut.write(buf, RECORDBYTES);
+        }
+
         tmpOut.close();
 
         // Reopen temp file so we can write a reversed version
@@ -1860,12 +1902,18 @@ class TeraLCP {
         thrOut.rdbuf()->pubsetbuf(outBuf1.data(), outBuf1.size());
         thrPosOut.rdbuf()->pubsetbuf(outBuf2.data(), outBuf2.size());
 
-        // Advance in BWT order, while advancing in reverse order through the
-        // temp file
+        // Advance in BWT order, while advancing in reverse order through the temp file.
+        auto writeOne = [&](uint64_t thr, uint64_t pos) {
+            char outBuf[THRBYTES];
+            std::memcpy(outBuf, &thr, THRBYTES);
+            thrOut.write(outBuf, THRBYTES);
+            std::memcpy(outBuf, &pos, THRBYTES);
+            thrPosOut.write(outBuf, THRBYTES);
+        };
+
         for (uint64_t bwtRun = 0; bwtRun < runs; ++bwtRun) {
             uint64_t outThr, outPos;
             if (bwtRun == firstOccurrence[symbols[bwtRun]]) {
-                // first occurrence of character gets 0s, per MONI format
                 outThr = outPos = 0;
             } else {
                 uint64_t tmpIdx = runs - 1 - bwtRun;
@@ -1874,11 +1922,7 @@ class TeraLCP {
                 std::memcpy(&outThr, buf, THRBYTES);
                 std::memcpy(&outPos, buf + THRBYTES, THRBYTES);
             }
-            char outBuf[THRBYTES];
-            std::memcpy(outBuf, &outThr, THRBYTES);
-            thrOut.write(outBuf, THRBYTES);
-            std::memcpy(outBuf, &outPos, THRBYTES);
-            thrPosOut.write(outBuf, THRBYTES);
+            writeOne(outThr, outPos);
         }
 
         tmpIn.close();
@@ -2014,7 +2058,10 @@ class TeraLCP {
             currentStarts[pointToInt(lfPoint)] = rlbwt[i];
         }
 
-        return {std::move(runLengths), std::move(rlbwt)};
+        RunInfo info;
+        info.lengths = std::move(runLengths);
+        info.symbols = std::move(rlbwt);
+        return info;
     }
 
     void printPhiAndLCP(const sdsl::int_vector<>& PLCPsamples) const {
