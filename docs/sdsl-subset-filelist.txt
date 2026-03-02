@@ -1,0 +1,50 @@
+# sdsl subset file list
+
+This file records the vendored subset currently checked into:
+`src/thirdparty/sdsl_subset`.
+
+The subset is generated from upstream `sdsl-lite` using:
+- `tools/vendor_sdsl_subset.sh`
+- pinned upstream commit recorded in `src/thirdparty/sdsl_subset/MANIFEST.md`
+
+## Included headers (`src/thirdparty/sdsl_subset/include/sdsl`)
+- bits.hpp
+- config.hpp
+- int_vector.hpp
+- int_vector_buffer.hpp
+- io.hpp
+- iterators.hpp
+- memory_management.hpp
+- ram_filebuf.hpp
+- ram_fs.hpp
+- sdsl_concepts.hpp
+- sfstream.hpp
+- structure_tree.hpp
+- uintx_t.hpp
+- util.hpp
+
+## Included source files (`src/thirdparty/sdsl_subset/src`)
+- bits.cpp
+- io.cpp
+- memory_management.cpp
+- ram_filebuf.cpp
+- ram_fs.cpp
+- sfstream.cpp
+- structure_tree.cpp
+- util.cpp
+
+## Purpose of this subset
+The retained files satisfy the currently used project sdsl surface:
+- `sdsl::int_vector<>` / `sdsl::bit_vector`
+- `sdsl::bits::hi`
+- `sdsl::util::{expand_width,bit_compress,class_name}`
+- `sdsl::{serialize,load}` and structure-tree helpers
+- optional diagnostics (`size_in_bytes`, `write_structure`)
+
+## Excluded categories
+Not vendored:
+- compressed text indexes (CSA/CST)
+- wavelet trees
+- rank/select compressed vectors (`rrr_vector`, `sd_vector`)
+- coders (`elias_*`, `fibonacci`, etc.)
+- LOUDS/BP/RMQ families
