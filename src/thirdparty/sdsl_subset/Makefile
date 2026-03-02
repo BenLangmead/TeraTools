@@ -16,7 +16,7 @@ CPPFLAGS ?= -I$(LOCAL_INCLUDE_ROOT) -I$(HEADER_SOURCE_ROOT)
 
 SOURCES := $(wildcard src/*.cpp)
 OBJECTS := $(SOURCES:.cpp=.o)
-LIB := lib/libsdsl.a
+LIB := lib/libsdsl_subset.a
 
 all: $(LIB)
 
@@ -34,6 +34,6 @@ install: $(LIB)
 	cp -a $(LIB) $(PREFIX)/lib/
 
 clean:
-	rm -f src/*.o lib/libsdsl.a
+	rm -f src/*.o lib/libsdsl_subset.a
 
 .PHONY: all install clean

@@ -46,7 +46,7 @@ make -C src/thirdparty/sdsl_subset install PREFIX=..
 
 This installs:
 - headers into `src/thirdparty/include/sdsl`
-- `libsdsl.a` into `src/thirdparty/lib`
+- `libsdsl_subset.a` into `src/thirdparty/lib`
 
 ## Local adaptation
 
