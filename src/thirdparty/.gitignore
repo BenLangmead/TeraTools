@@ -1,3 +1,6 @@
 include/
 lib/
 sdsl-lite/
+!sdsl_subset/include/
+!sdsl_subset/include/sdsl/
+!sdsl_subset/include/sdsl/*.hpp
