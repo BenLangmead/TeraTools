@@ -1,5 +1,8 @@
 SDSL_SUBSET_DIR := sdsl_subset
-USE_LOCAL_SUBSET := $(if $(wildcard $(SDSL_SUBSET_DIR)/Makefile),1,0)
+SDSL_SUBSET_HEADERS := $(SDSL_SUBSET_DIR)/include/sdsl/bits.hpp
+INTEGRATED_SDSL_HEADERS := include/sdsl/bits.hpp
+
+USE_LOCAL_SUBSET := $(if $(wildcard $(SDSL_SUBSET_HEADERS) $(INTEGRATED_SDSL_HEADERS)),1,0)
 
 all: lib/ include/
 .PHONY: all clean sdsl-source
