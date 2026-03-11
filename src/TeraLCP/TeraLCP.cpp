@@ -196,24 +196,20 @@ int main(const int argc, const char*argv[]) {
     }
 
 
-    if (o.orlcp != "") {
-        #ifndef BENCHFASTONLY
-        if (o.v >= TIME) { Timer.start("min LCP per run computation"); }
-        #endif
-        std::ofstream lcpOut(o.orlcp);
-        if (!lcpOut.is_open()) {
-            std::cerr << "ERROR: File '" << o.orlcp << "' failed to open for writing!\n";
+    if (o.oindex != "") {
+        std::ofstream indOut;
+        indOut.open(o.oindex);
+        if (!indOut.is_open()) {
+            std::cerr << "ERROR: File '" << o.oindex << ".optbwtrl' failed to open for writing!\n";
             exit(1);
         }
-        auto l = ourIndex.ComputeMinLCPRunParallelDestructive(o.v);
-        assert(l.first.size() == l.second.size());
-        uint64_t runs = l.first.size();
-        if (o.v >= TIME) { Timer.start("sequential output min LCP per run"); }
-        for (uint64_t i = 0; i < runs; ++i) 
-            lcpOut << "( " << l.first[i] << ", " << l.second[i] << ")\n";
-        if (o.v >= TIME) { Timer.stop(); } //sequential output min LCP per run
         #ifndef BENCHFASTONLY
-        if (o.v >= TIME) { Timer.stop(); } //min LCP per run computation
+        if (o.v >= TIME) { Timer.start("Writing Index"); }
+        #endif
+        ourIndex.serialize(indOut);
+        indOut.close();
+        #ifndef BENCHFASTONLY
+        if (o.v >= TIME) { Timer.stop(); } //Writing Index 
         #endif
     }
 
@@ -258,21 +254,24 @@ int main(const int argc, const char*argv[]) {
     if (o.v >= TIME) { Timer.stop(); } //Measure size 
     #endif
 
-
-    if (o.oindex != "") {
-        std::ofstream indOut;
-        indOut.open(o.oindex);
-        if (!indOut.is_open()) {
-            std::cerr << "ERROR: File '" << o.oindex << ".optbwtrl' failed to open for writing!\n";
+    if (o.orlcp != "") {
+        #ifndef BENCHFASTONLY
+        if (o.v >= TIME) { Timer.start("min LCP per run computation"); }
+        #endif
+        std::ofstream lcpOut(o.orlcp);
+        if (!lcpOut.is_open()) {
+            std::cerr << "ERROR: File '" << o.orlcp << "' failed to open for writing!\n";
             exit(1);
         }
+        auto l = ourIndex.ComputeMinLCPRunParallelDestructive(o.v);
+        assert(l.first.size() == l.second.size());
+        uint64_t runs = l.first.size();
+        if (o.v >= TIME) { Timer.start("sequential output min LCP per run"); }
+        for (uint64_t i = 0; i < runs; ++i) 
+            lcpOut << "( " << l.first[i] << ", " << l.second[i] << ")\n";
+        if (o.v >= TIME) { Timer.stop(); } //sequential output min LCP per run
         #ifndef BENCHFASTONLY
-        if (o.v >= TIME) { Timer.start("Writing Index"); }
-        #endif
-        ourIndex.serialize(indOut);
-        indOut.close();
-        #ifndef BENCHFASTONLY
-        if (o.v >= TIME) { Timer.stop(); } //Writing Index 
+        if (o.v >= TIME) { Timer.stop(); } //min LCP per run computation
         #endif
     }
 
