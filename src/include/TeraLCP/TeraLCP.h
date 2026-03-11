@@ -310,8 +310,16 @@ class TeraLCP {
         {
             std::vector<uint64_t> maxPhiIntLenPerSeq(numSequences);
             std::vector<MoveStructureTable::IntervalPoint> correctSeqPsis(numSequences);
-            #pragma omp parallel for schedule(dynamic, 1)
-            for (uint64_t seq = 0; seq < numSequences; ++seq) {
+            #ifndef BENCHFASTONLY
+            std::atomic<uint64_t> progressCompleted(0);
+            uint64_t progressLastReportedPct = 0;
+            #endif
+            #pragma omp parallel
+            {
+                uint64_t localCompleted = 0;
+                const uint64_t progressStride = 10;
+                #pragma omp for schedule(dynamic, 1)
+                for (uint64_t seq = 0; seq < numSequences; ++seq) {
                 MoveStructureTable::IntervalPoint start = {static_cast<uint64_t>(-1), seq, 0}, curr;
                 start = Psi.map(start);
                 curr = start;
@@ -353,6 +361,42 @@ class TeraLCP {
                 seqLens[seqStartingAtStart + 1] = len;
                 numTopRuns[seqStartingAtStart + 1] = numTop;
                 maxPhiIntLenPerSeq[seqStartingAtStart] = maxPhiIntLenThisSeq;
+
+                #ifndef BENCHFASTONLY
+                if (v >= TIME) {
+                    ++localCompleted;
+                    if (localCompleted >= progressStride) {
+                        uint64_t c = progressCompleted.fetch_add(localCompleted) + localCompleted;
+                        localCompleted = 0;
+                        #pragma omp critical(progress_parallel_seq)
+                        {
+                            uint64_t pct = (c * 100) / numSequences;
+                            if (pct >= 100) pct = 100;
+                            if (pct >= progressLastReportedPct + 10 || (pct == 100 && progressLastReportedPct < 100)) {
+                                progressLastReportedPct = pct;
+                                uint64_t overallPct = (20 * (0 * 100 + pct)) / 100;
+                                std::cout << "  Progress: " << pct << "% through Parallel seq traversal; Overall: ~" << overallPct << "%\n";
+                            }
+                        }
+                    }
+                }
+                #endif
+                }
+                #ifndef BENCHFASTONLY
+                if (v >= TIME && localCompleted > 0) {
+                    uint64_t c = progressCompleted.fetch_add(localCompleted) + localCompleted;
+                    #pragma omp critical(progress_parallel_seq)
+                    {
+                        uint64_t pct = (c * 100) / numSequences;
+                        if (pct >= 100) pct = 100;
+                        if (pct >= progressLastReportedPct + 10 || (pct == 100 && progressLastReportedPct < 100)) {
+                            progressLastReportedPct = pct;
+                            uint64_t overallPct = (20 * (0 * 100 + pct)) / 100;
+                            std::cout << "  Progress: " << pct << "% through Parallel seq traversal; Overall: ~" << overallPct << "%\n";
+                        }
+                    }
+                }
+                #endif
             }
 
             maxPhiIntLen = 0;
@@ -398,8 +442,16 @@ class TeraLCP {
         #endif
         {
             uint64_t dangerousInts = 64/std::min(PhiIntLen.width(), intAtTop.width()) + (64 % std::min(PhiIntLen.width(), intAtTop.width()) != 0);
-            #pragma omp parallel for schedule(dynamic, 1)
-            for (uint64_t seq = 0; seq < numSequences; ++seq) {
+            #ifndef BENCHFASTONLY
+            std::atomic<uint64_t> progressCompleted(0);
+            uint64_t progressLastReportedPct = 0;
+            #endif
+            #pragma omp parallel
+            {
+                uint64_t localCompleted = 0;
+                const uint64_t progressStride = 10;
+                #pragma omp for schedule(dynamic, 1)
+                for (uint64_t seq = 0; seq < numSequences; ++seq) {
                 uint64_t prevSeq = (seq)? seq - 1 : numSequences - 1;
                 MoveStructureTable::IntervalPoint curr = {static_cast<uint64_t>(-1), prevSeq, 0};
                 curr = Psi.map(curr);
@@ -476,6 +528,42 @@ class TeraLCP {
                 //}
                 //exit(1);
                 //}
+
+                #ifndef BENCHFASTONLY
+                if (v >= TIME) {
+                    ++localCompleted;
+                    if (localCompleted >= progressStride) {
+                        uint64_t c = progressCompleted.fetch_add(localCompleted) + localCompleted;
+                        localCompleted = 0;
+                        #pragma omp critical(progress_second_seq)
+                        {
+                            uint64_t pct = (c * 100) / numSequences;
+                            if (pct >= 100) pct = 100;
+                            if (pct >= progressLastReportedPct + 10 || (pct == 100 && progressLastReportedPct < 100)) {
+                                progressLastReportedPct = pct;
+                                uint64_t overallPct = (20 * (1 * 100 + pct)) / 100;
+                                std::cout << "  Progress: " << pct << "% through Second Parallel seq traversal; Overall: ~" << overallPct << "%\n";
+                            }
+                        }
+                    }
+                }
+                #endif
+                }
+                #ifndef BENCHFASTONLY
+                if (v >= TIME && localCompleted > 0) {
+                    uint64_t c = progressCompleted.fetch_add(localCompleted) + localCompleted;
+                    #pragma omp critical(progress_second_seq)
+                    {
+                        uint64_t pct = (c * 100) / numSequences;
+                        if (pct >= 100) pct = 100;
+                        if (pct >= progressLastReportedPct + 10 || (pct == 100 && progressLastReportedPct < 100)) {
+                            progressLastReportedPct = pct;
+                            uint64_t overallPct = (20 * (1 * 100 + pct)) / 100;
+                            std::cout << "  Progress: " << pct << "% through Second Parallel seq traversal; Overall: ~" << overallPct << "%\n";
+                        }
+                    }
+                }
+                #endif
             }
         }
         /*
@@ -607,8 +695,16 @@ class TeraLCP {
                 dangerousBufferInts = 64/buffer.width + (64 % buffer.width != 0);
             else
                 dangerousBufferInts = 1;
-            #pragma omp parallel for num_threads(threads) schedule (dynamic, 1)
-            for (uint64_t seq = 0; seq < numSequences; ++seq) {
+            #ifndef BENCHFASTONLY
+            std::atomic<uint64_t> progressCompleted(0);
+            uint64_t progressLastReportedPct = 0;
+            #endif
+            #pragma omp parallel num_threads(threads)
+            {
+                uint64_t localCompleted = 0;
+                const uint64_t progressStride = 10;
+                #pragma omp for schedule(dynamic, 1)
+                for (uint64_t seq = 0; seq < numSequences; ++seq) {
                 //curr is the interval point in the psi move data structure of suffix suff
                 //if curr is at the top of a psi interval, then suff+1 is at the top of an rlbwt interval
                 //if curr is at the bottom of a psi interval, then suff+1 is at the bottom of an rlbwt interval
@@ -776,6 +872,42 @@ class TeraLCP {
                     std::cerr << "ERROR: phiPoint didn't end up at the beginning of the next sequence!" << std::endl;
                     exit(1);
                 }
+
+                #ifndef BENCHFASTONLY
+                if (v >= TIME) {
+                    ++localCompleted;
+                    if (localCompleted >= progressStride) {
+                        uint64_t c = progressCompleted.fetch_add(localCompleted) + localCompleted;
+                        localCompleted = 0;
+                        #pragma omp critical(progress_construct_phi)
+                        {
+                            uint64_t pct = (c * 100) / numSequences;
+                            if (pct >= 100) pct = 100;
+                            if (pct >= progressLastReportedPct + 10 || (pct == 100 && progressLastReportedPct < 100)) {
+                                progressLastReportedPct = pct;
+                                uint64_t overallPct = (20 * (2 * 100 + pct)) / 100;
+                                std::cout << "  Progress: " << pct << "% through Construct Phi and Samples; Overall: ~" << overallPct << "%\n";
+                            }
+                        }
+                    }
+                }
+                #endif
+                }
+                #ifndef BENCHFASTONLY
+                if (v >= TIME && localCompleted > 0) {
+                    uint64_t c = progressCompleted.fetch_add(localCompleted) + localCompleted;
+                    #pragma omp critical(progress_construct_phi)
+                    {
+                        uint64_t pct = (c * 100) / numSequences;
+                        if (pct >= 100) pct = 100;
+                        if (pct >= progressLastReportedPct + 10 || (pct == 100 && progressLastReportedPct < 100)) {
+                            progressLastReportedPct = pct;
+                            uint64_t overallPct = (20 * (2 * 100 + pct)) / 100;
+                            std::cout << "  Progress: " << pct << "% through Construct Phi and Samples; Overall: ~" << overallPct << "%\n";
+                        }
+                    }
+                }
+                #endif
             }
         }
         #ifndef BENCHFASTONLY
@@ -811,8 +943,17 @@ class TeraLCP {
         prevPsiIntSeqStart[0] = intAtEnd[F.size() - 1];
         for (uint64_t i = 1; i < numSequences; ++i)
             prevPsiIntSeqStart[i] = intAtEnd[numTopRuns[i] - 1];
-        #pragma omp parallel for schedule (dynamic, 1)
-        for (uint64_t seq = 0; seq < numSequences; ++seq) {
+        #ifndef BENCHFASTONLY
+        std::atomic<uint64_t> progressCompleted(0);
+        uint64_t progressLastReportedPct = 0;
+        uint64_t progressTotal = F.size();
+        #endif
+        #pragma omp parallel
+        {
+            uint64_t localCompleted = 0;
+            const uint64_t progressStride = 10;
+            #pragma omp for schedule(dynamic, 1)
+            for (uint64_t seq = 0; seq < numSequences; ++seq) {
             uint64_t suffMatchEnd = seqLens[seq], currIntStart = seqLens[seq];
             MoveStructureTable::IntervalPoint suffMatchEndIntPoint = Psi.map({static_cast<uint64_t>(-1), ((seq)? seq - 1 : numSequences - 1), 0});
             const uint64_t start = numTopRuns[seq];
@@ -926,7 +1067,43 @@ class TeraLCP {
                     }
                     --plcpWritesOccurring;
                 }
+
+                #ifndef BENCHFASTONLY
+                if (v >= TIME) {
+                    ++localCompleted;
+                    if (localCompleted >= progressStride) {
+                        uint64_t c = progressCompleted.fetch_add(localCompleted) + localCompleted;
+                        localCompleted = 0;
+                        #pragma omp critical(progress_lcp)
+                        {
+                            uint64_t pct = (c * 100) / progressTotal;
+                            if (pct >= 100) pct = 100;
+                            if (pct >= progressLastReportedPct + 10 || (pct == 100 && progressLastReportedPct < 100)) {
+                                progressLastReportedPct = pct;
+                                uint64_t overallPct = (20 * (3 * 100 + pct)) / 100;
+                                std::cout << "  Progress: " << pct << "% through LCP Computation; Overall: ~" << overallPct << "%\n";
+                            }
+                        }
+                    }
+                }
+                #endif
             }
+            }
+            #ifndef BENCHFASTONLY
+            if (v >= TIME && localCompleted > 0) {
+                uint64_t c = progressCompleted.fetch_add(localCompleted) + localCompleted;
+                #pragma omp critical(progress_lcp)
+                {
+                    uint64_t pct = (c * 100) / progressTotal;
+                    if (pct >= 100) pct = 100;
+                    if (pct >= progressLastReportedPct + 10 || (pct == 100 && progressLastReportedPct < 100)) {
+                        progressLastReportedPct = pct;
+                        uint64_t overallPct = (20 * (3 * 100 + pct)) / 100;
+                        std::cout << "  Progress: " << pct << "% through LCP Computation; Overall: ~" << overallPct << "%\n";
+                    }
+                }
+            }
+            #endif
         }
 
         PLCPsamples = std::move(intAtEnd);
@@ -1446,8 +1623,16 @@ class TeraLCP {
         const uint64_t minBitWidth = std::min(std::min(psilenwidth, static_cast<uint64_t>(PLCPsamples.width())), static_cast<uint64_t>(prevRunIntAtTop.width()));
         const uint64_t dangerousInts = 64/minBitWidth + ((64%minBitWidth) != 0);
         if (v >= VERB) { std::cout << "Block size: " << blockSize << std::endl; }
-        #pragma omp parallel for schedule(dynamic, 1)
-        for (uint64_t block = 0; block < numBlocks; ++block) {
+        #ifndef BENCHFASTONLY
+        std::atomic<uint64_t> progressCompleted(0);
+        uint64_t progressLastReportedPct = 0;
+        #endif
+        #pragma omp parallel
+        {
+            uint64_t localCompleted = 0;
+            const uint64_t progressStride = 10;
+            #pragma omp for schedule(dynamic, 1)
+            for (uint64_t block = 0; block < numBlocks; ++block) {
             const uint64_t start = block*blockSize;
             const uint64_t end = std::min(runs, start + blockSize);
             const uint64_t safeStart = start + dangerousInts,
@@ -1495,6 +1680,42 @@ class TeraLCP {
                     }
                 }
             }
+
+            #ifndef BENCHFASTONLY
+            if (v >= TIME) {
+                ++localCompleted;
+                if (localCompleted >= progressStride) {
+                    uint64_t c = progressCompleted.fetch_add(localCompleted) + localCompleted;
+                    localCompleted = 0;
+                    #pragma omp critical(progress_per_run)
+                    {
+                        uint64_t pct = (c * 100) / numBlocks;
+                        if (pct >= 100) pct = 100;
+                        if (pct >= progressLastReportedPct + 10 || (pct == 100 && progressLastReportedPct < 100)) {
+                            progressLastReportedPct = pct;
+                            uint64_t overallPct = (20 * (4 * 100 + pct)) / 100;
+                            std::cout << "  Progress: " << pct << "% through Parallel per run computation; Overall: ~" << overallPct << "%\n";
+                        }
+                    }
+                }
+            }
+            #endif
+            }
+            #ifndef BENCHFASTONLY
+            if (v >= TIME && localCompleted > 0) {
+                uint64_t c = progressCompleted.fetch_add(localCompleted) + localCompleted;
+                #pragma omp critical(progress_per_run)
+                {
+                    uint64_t pct = (c * 100) / numBlocks;
+                    if (pct >= 100) pct = 100;
+                    if (pct >= progressLastReportedPct + 10 || (pct == 100 && progressLastReportedPct < 100)) {
+                        progressLastReportedPct = pct;
+                        uint64_t overallPct = (20 * (4 * 100 + pct)) / 100;
+                        std::cout << "  Progress: " << pct << "% through Parallel per run computation; Overall: ~" << overallPct << "%\n";
+                    }
+                }
+            }
+            #endif
         }
         if (v >= TIME) { Timer.stop(); } //Parallel per run computation
 
