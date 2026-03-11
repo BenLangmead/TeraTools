@@ -13,6 +13,7 @@ static constexpr const char* lcp_index_extension = ".lcp_index";
 
 class TeraLCP {
     uint64_t totalLen;
+    uint64_t chunkSize_ = 1;
 
     sdsl::int_vector<> F;
     
@@ -303,7 +304,7 @@ class TeraLCP {
         {
             std::vector<uint64_t> maxPhiIntLenPerSeq(numSequences);
             std::vector<MoveStructureTable::IntervalPoint> correctSeqPsis(numSequences);
-            #pragma omp parallel for schedule(dynamic, 1)
+            #pragma omp parallel for schedule(dynamic, chunkSize_)
             for (uint64_t seq = 0; seq < numSequences; ++seq) {
                 MoveStructureTable::IntervalPoint start = {static_cast<uint64_t>(-1), seq, 0}, curr;
                 start = Psi.map(start);
@@ -391,7 +392,7 @@ class TeraLCP {
         #endif
         {
             uint64_t dangerousInts = 64/std::min(PhiIntLen.width(), intAtTop.width()) + (64 % std::min(PhiIntLen.width(), intAtTop.width()) != 0);
-            #pragma omp parallel for schedule(dynamic, 1)
+            #pragma omp parallel for schedule(dynamic, chunkSize_)
             for (uint64_t seq = 0; seq < numSequences; ++seq) {
                 uint64_t prevSeq = (seq)? seq - 1 : numSequences - 1;
                 MoveStructureTable::IntervalPoint curr = {static_cast<uint64_t>(-1), prevSeq, 0};
@@ -600,7 +601,7 @@ class TeraLCP {
                 dangerousBufferInts = 64/buffer.width + (64 % buffer.width != 0);
             else
                 dangerousBufferInts = 1;
-            #pragma omp parallel for num_threads(threads) schedule (dynamic, 1)
+            #pragma omp parallel for num_threads(threads) schedule(dynamic, chunkSize_)
             for (uint64_t seq = 0; seq < numSequences; ++seq) {
                 //curr is the interval point in the psi move data structure of suffix suff
                 //if curr is at the top of a psi interval, then suff+1 is at the top of an rlbwt interval
@@ -804,7 +805,7 @@ class TeraLCP {
         prevPsiIntSeqStart[0] = intAtEnd[F.size() - 1];
         for (uint64_t i = 1; i < numSequences; ++i)
             prevPsiIntSeqStart[i] = intAtEnd[numTopRuns[i] - 1];
-        #pragma omp parallel for schedule (dynamic, 1)
+        #pragma omp parallel for schedule(dynamic, chunkSize_)
         for (uint64_t seq = 0; seq < numSequences; ++seq) {
             uint64_t suffMatchEnd = seqLens[seq], currIntStart = seqLens[seq];
             MoveStructureTable::IntervalPoint suffMatchEndIntPoint = Psi.map({static_cast<uint64_t>(-1), ((seq)? seq - 1 : numSequences - 1), 0});
@@ -943,7 +944,8 @@ class TeraLCP {
             #ifndef BENCHFASTONLY
             , verbosity v = QUIET
             #endif
-            ) {
+            , uint64_t chunkSize = 1
+            ) : chunkSize_(chunkSize) {
         #ifndef BENCHFASTONLY
         if (v >= TIME) { Timer.start("LCP index loading from file"); }
         #endif
@@ -962,7 +964,8 @@ class TeraLCP {
             #ifndef BENCHFASTONLY
             , verbosity v = QUIET
             #endif
-            ) {
+            , uint64_t chunkSize = 1
+            ) : chunkSize_(chunkSize) {
         #ifndef BENCHFASTONLY
         if (v >= VERB) { std::cout << "Number of threads: " << omp_get_max_threads() << "\n"; }
         #endif
@@ -1439,7 +1442,7 @@ class TeraLCP {
         const uint64_t minBitWidth = std::min(std::min(psilenwidth, static_cast<uint64_t>(PLCPsamples.width())), static_cast<uint64_t>(prevRunIntAtTop.width()));
         const uint64_t dangerousInts = 64/minBitWidth + ((64%minBitWidth) != 0);
         if (v >= VERB) { std::cout << "Block size: " << blockSize << std::endl; }
-        #pragma omp parallel for schedule(dynamic, 1)
+        #pragma omp parallel for schedule(dynamic, chunkSize_)
         for (uint64_t block = 0; block < numBlocks; ++block) {
             const uint64_t start = block*blockSize;
             const uint64_t end = std::min(runs, start + blockSize);
