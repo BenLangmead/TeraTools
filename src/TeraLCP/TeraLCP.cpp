@@ -35,6 +35,7 @@ void printUsage() {
         "\n"
         "  Behavior:\n"
         "    -p          INT                             optional       Limit the program to (nonnegative) INT threads. By default uses maximum available. Maximum on this hardware is " << omp_get_max_threads() << "\n"
+        "    -chunk      INT                             optional       Chunk size for OpenMP dynamic scheduling (default 1)\n"
         "    -mmap                                       optional       read input using memory mapping (only avaiable for fmd) default: no memory mapping\n"
         #ifndef BENCHFASTONLY
         "    -v          [quiet,time,verb]               optional       Verbosity, verb for most verbose output, time for timer info, and quiet for no output. time is default.\n"
@@ -56,6 +57,7 @@ struct options{
     enum inputFormat { text, bwt, rlbwt, fmd, lcp_index }inputFormat;
     std::string inputFile, tempFile, oindex="", orlcp="", otsv="", tsvmode="top";
     unsigned numThreads = omp_get_max_threads();
+    uint64_t chunkSize = 1;
     bool mmap;
     bool threshbound = false;
     #ifndef BENCHFASTONLY
@@ -100,6 +102,9 @@ void processOptions(const int argc, const char* argv[]) {
     s = getArg("-p", false, true);
     if (s != "")
         o.numThreads = std::stoul(s);
+    s = getArg("-chunk", false, true);
+    if (s != "")
+        o.chunkSize = std::stoull(s);
     o.mmap = ("-mmap" == getArg("-mmap", false, false));
 #ifndef BENCHFASTONLY
     s = getArg("-v", false, true);
@@ -186,13 +191,19 @@ int main(const int argc, const char*argv[]) {
                 #ifndef BENCHFASTONLY
                 , o.v
                 #endif
+                , o.chunkSize
                 );
         #ifndef BENCHFASTONLY
         if (o.v >= TIME) { Timer.stop(); } //LCP index construction 
         #endif
     }
     else if (o.inputFormat == options::lcp_index) {
-        ourIndex = TeraLCP(o.inputFile, o.v);
+        ourIndex = TeraLCP(o.inputFile
+                #ifndef BENCHFASTONLY
+                , o.v
+                #endif
+                , o.chunkSize
+                );
     }
 
 

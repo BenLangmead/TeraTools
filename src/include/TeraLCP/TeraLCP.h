@@ -20,6 +20,7 @@ static constexpr const char* lcp_index_extension = ".lcp_index";
 
 class TeraLCP {
     uint64_t totalLen;
+    uint64_t chunkSize_ = 1;
 
     sdsl::int_vector<> F;
     
@@ -318,7 +319,7 @@ class TeraLCP {
             {
                 uint64_t localCompleted = 0;
                 const uint64_t progressStride = 10;
-                #pragma omp for schedule(dynamic, 1)
+                #pragma omp for schedule(dynamic, chunkSize_)
                 for (uint64_t seq = 0; seq < numSequences; ++seq) {
                 MoveStructureTable::IntervalPoint start = {static_cast<uint64_t>(-1), seq, 0}, curr;
                 start = Psi.map(start);
@@ -450,7 +451,7 @@ class TeraLCP {
             {
                 uint64_t localCompleted = 0;
                 const uint64_t progressStride = 10;
-                #pragma omp for schedule(dynamic, 1)
+                #pragma omp for schedule(dynamic, chunkSize_)
                 for (uint64_t seq = 0; seq < numSequences; ++seq) {
                 uint64_t prevSeq = (seq)? seq - 1 : numSequences - 1;
                 MoveStructureTable::IntervalPoint curr = {static_cast<uint64_t>(-1), prevSeq, 0};
@@ -703,7 +704,7 @@ class TeraLCP {
             {
                 uint64_t localCompleted = 0;
                 const uint64_t progressStride = 10;
-                #pragma omp for schedule(dynamic, 1)
+                #pragma omp for schedule(dynamic, chunkSize_)
                 for (uint64_t seq = 0; seq < numSequences; ++seq) {
                 //curr is the interval point in the psi move data structure of suffix suff
                 //if curr is at the top of a psi interval, then suff+1 is at the top of an rlbwt interval
@@ -952,7 +953,7 @@ class TeraLCP {
         {
             uint64_t localCompleted = 0;
             const uint64_t progressStride = 10;
-            #pragma omp for schedule(dynamic, 1)
+            #pragma omp for schedule(dynamic, chunkSize_)
             for (uint64_t seq = 0; seq < numSequences; ++seq) {
             uint64_t suffMatchEnd = seqLens[seq], currIntStart = seqLens[seq];
             MoveStructureTable::IntervalPoint suffMatchEndIntPoint = Psi.map({static_cast<uint64_t>(-1), ((seq)? seq - 1 : numSequences - 1), 0});
@@ -1127,7 +1128,8 @@ class TeraLCP {
             #ifndef BENCHFASTONLY
             , verbosity v = QUIET
             #endif
-            ) {
+            , uint64_t chunkSize = 1
+            ) : chunkSize_(chunkSize) {
         #ifndef BENCHFASTONLY
         if (v >= TIME) { Timer.start("LCP index loading from file"); }
         #endif
@@ -1146,7 +1148,8 @@ class TeraLCP {
             #ifndef BENCHFASTONLY
             , verbosity v = QUIET
             #endif
-            ) {
+            , uint64_t chunkSize = 1
+            ) : chunkSize_(chunkSize) {
         #ifndef BENCHFASTONLY
         if (v >= VERB) { std::cout << "Number of threads: " << omp_get_max_threads() << "\n"; }
         #endif
@@ -1631,7 +1634,7 @@ class TeraLCP {
         {
             uint64_t localCompleted = 0;
             const uint64_t progressStride = 10;
-            #pragma omp for schedule(dynamic, 1)
+            #pragma omp for schedule(dynamic, chunkSize_)
             for (uint64_t block = 0; block < numBlocks; ++block) {
             const uint64_t start = block*blockSize;
             const uint64_t end = std::min(runs, start + blockSize);
