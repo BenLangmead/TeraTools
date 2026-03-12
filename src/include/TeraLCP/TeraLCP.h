@@ -8,6 +8,7 @@
 #include<omp.h>
 #include<atomic>
 #include<mutex>
+#include<sched.h>
 
 static constexpr const char* lcp_index_extension = ".lcp_index";
 
@@ -886,7 +887,8 @@ class TeraLCP {
                         //precedence
                         //
                         //I can't think of a better way to do this other than spinlock right now.
-                        while (plcpWritesOccurring);
+                        while (plcpWritesOccurring)
+                            sched_yield();
 
                         std::lock_guard<std::mutex> lock(updateWidthMutex);
                         //this function checks if w <= width and if so exits early, so the non atomic check in the above if statement is fine.
@@ -900,7 +902,8 @@ class TeraLCP {
                 bool written = false;
                 while (!written) {
                     //busy wait
-                    while (updateWidthsWaiting);
+                    while (updateWidthsWaiting)
+                        sched_yield();
                     ++plcpWritesOccurring;
                     if (updateWidthsWaiting) {
                         --plcpWritesOccurring;
