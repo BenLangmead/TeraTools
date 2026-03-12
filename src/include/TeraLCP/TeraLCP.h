@@ -376,7 +376,7 @@ class TeraLCP {
                             if (pct >= progressLastReportedPct + 10 || (pct == 100 && progressLastReportedPct < 100)) {
                                 progressLastReportedPct = pct;
                                 uint64_t overallPct = (20 * (0 * 100 + pct)) / 100;
-                                std::cout << "  Progress: " << pct << "% through Parallel seq traversal; Overall: ~" << overallPct << "%\n";
+                                std::cout << "  Progress: " << pct << "% through Parallel seq traversal; Overall: ~" << overallPct << "%" << std::endl;
                             }
                         }
                     }
@@ -393,7 +393,7 @@ class TeraLCP {
                         if (pct >= progressLastReportedPct + 10 || (pct == 100 && progressLastReportedPct < 100)) {
                             progressLastReportedPct = pct;
                             uint64_t overallPct = (20 * (0 * 100 + pct)) / 100;
-                            std::cout << "  Progress: " << pct << "% through Parallel seq traversal; Overall: ~" << overallPct << "%\n";
+                            std::cout << "  Progress: " << pct << "% through Parallel seq traversal; Overall: ~" << overallPct << "%" << std::endl;
                         }
                     }
                 }
@@ -543,7 +543,7 @@ class TeraLCP {
                             if (pct >= progressLastReportedPct + 10 || (pct == 100 && progressLastReportedPct < 100)) {
                                 progressLastReportedPct = pct;
                                 uint64_t overallPct = (20 * (1 * 100 + pct)) / 100;
-                                std::cout << "  Progress: " << pct << "% through Second Parallel seq traversal; Overall: ~" << overallPct << "%\n";
+                                std::cout << "  Progress: " << pct << "% through Second Parallel seq traversal; Overall: ~" << overallPct << "%" << std::endl;
                             }
                         }
                     }
@@ -560,7 +560,7 @@ class TeraLCP {
                         if (pct >= progressLastReportedPct + 10 || (pct == 100 && progressLastReportedPct < 100)) {
                             progressLastReportedPct = pct;
                             uint64_t overallPct = (20 * (1 * 100 + pct)) / 100;
-                            std::cout << "  Progress: " << pct << "% through Second Parallel seq traversal; Overall: ~" << overallPct << "%\n";
+                            std::cout << "  Progress: " << pct << "% through Second Parallel seq traversal; Overall: ~" << overallPct << "%" << std::endl;
                         }
                     }
                 }
@@ -887,7 +887,7 @@ class TeraLCP {
                             if (pct >= progressLastReportedPct + 10 || (pct == 100 && progressLastReportedPct < 100)) {
                                 progressLastReportedPct = pct;
                                 uint64_t overallPct = (20 * (2 * 100 + pct)) / 100;
-                                std::cout << "  Progress: " << pct << "% through Construct Phi and Samples; Overall: ~" << overallPct << "%\n";
+                                std::cout << "  Progress: " << pct << "% through Construct Phi and Samples; Overall: ~" << overallPct << "%" << std::endl;
                             }
                         }
                     }
@@ -904,7 +904,7 @@ class TeraLCP {
                         if (pct >= progressLastReportedPct + 10 || (pct == 100 && progressLastReportedPct < 100)) {
                             progressLastReportedPct = pct;
                             uint64_t overallPct = (20 * (2 * 100 + pct)) / 100;
-                            std::cout << "  Progress: " << pct << "% through Construct Phi and Samples; Overall: ~" << overallPct << "%\n";
+                            std::cout << "  Progress: " << pct << "% through Construct Phi and Samples; Overall: ~" << overallPct << "%" << std::endl;
                         }
                     }
                 }
@@ -1082,7 +1082,7 @@ class TeraLCP {
                             if (pct >= progressLastReportedPct + 10 || (pct == 100 && progressLastReportedPct < 100)) {
                                 progressLastReportedPct = pct;
                                 uint64_t overallPct = (20 * (3 * 100 + pct)) / 100;
-                                std::cout << "  Progress: " << pct << "% through LCP Computation; Overall: ~" << overallPct << "%\n";
+                                std::cout << "  Progress: " << pct << "% through LCP Computation; Overall: ~" << overallPct << "%" << std::endl;
                             }
                         }
                     }
@@ -1100,7 +1100,7 @@ class TeraLCP {
                     if (pct >= progressLastReportedPct + 10 || (pct == 100 && progressLastReportedPct < 100)) {
                         progressLastReportedPct = pct;
                         uint64_t overallPct = (20 * (3 * 100 + pct)) / 100;
-                        std::cout << "  Progress: " << pct << "% through LCP Computation; Overall: ~" << overallPct << "%\n";
+                        std::cout << "  Progress: " << pct << "% through LCP Computation; Overall: ~" << overallPct << "%" << std::endl;
                     }
                 }
             }
@@ -1697,7 +1697,7 @@ class TeraLCP {
                         if (pct >= progressLastReportedPct + 10 || (pct == 100 && progressLastReportedPct < 100)) {
                             progressLastReportedPct = pct;
                             uint64_t overallPct = (20 * (4 * 100 + pct)) / 100;
-                            std::cout << "  Progress: " << pct << "% through Parallel per run computation; Overall: ~" << overallPct << "%\n";
+                            std::cout << "  Progress: " << pct << "% through Parallel per run computation; Overall: ~" << overallPct << "%" << std::endl;
                         }
                     }
                 }
@@ -1714,7 +1714,7 @@ class TeraLCP {
                     if (pct >= progressLastReportedPct + 10 || (pct == 100 && progressLastReportedPct < 100)) {
                         progressLastReportedPct = pct;
                         uint64_t overallPct = (20 * (4 * 100 + pct)) / 100;
-                        std::cout << "  Progress: " << pct << "% through Parallel per run computation; Overall: ~" << overallPct << "%\n";
+                        std::cout << "  Progress: " << pct << "% through Parallel per run computation; Overall: ~" << overallPct << "%" << std::endl;
                     }
                 }
             }
