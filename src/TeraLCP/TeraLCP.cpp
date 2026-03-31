@@ -30,7 +30,9 @@ void printUsage() {
         "                                                                sample      : Outputs top, min, and a sample of interior LCPs sufficient\n"
         "                                                                              for matching statistics (in reverse run order).\n"
         "                                                                thresholds  : Outputs MONI-style .thr and .thr_pos files\n"
-        "                                                                              (-otsv specifies base path).\n"
+        "                                                                              (-otsv specifies base path). Run metadata is read from FMD:\n"
+        "                                                                              with -f fmd use -i as the FMD path; with -f lcp_index pass --fmd.\n"
+        "    --fmd        FILE                            optional       (thresholds with -f lcp_index) REQUIRED: FMD file matching the index\n"
         "    -threshbound                                optional       (thresholds only) Prefer row boundarues (offsets 0 or len) when minimal\n"
         "\n"
         "  Behavior:\n"
@@ -54,7 +56,7 @@ void printUsage() {
 
 struct options{
     enum inputFormat { text, bwt, rlbwt, fmd, lcp_index }inputFormat;
-    std::string inputFile, tempFile, oindex="", orlcp="", otsv="", tsvmode="top";
+    std::string inputFile, tempFile, oindex="", orlcp="", otsv="", tsvmode="top", fmdFile="";
     unsigned numThreads = omp_get_max_threads();
     bool mmap;
     bool threshbound = false;
@@ -97,6 +99,7 @@ void processOptions(const int argc, const char* argv[]) {
     o.tsvmode = getArg("-tsvmode", false, true);
     if (o.tsvmode == "") o.tsvmode = "top";
     o.threshbound = (getArg("-threshbound", false, false) != "");
+    o.fmdFile = getArg("--fmd", false, true);
     s = getArg("-p", false, true);
     if (s != "")
         o.numThreads = std::stoul(s);
@@ -131,6 +134,8 @@ void processOptions(const int argc, const char* argv[]) {
     testOutFile(o.oindex);
     testOutFile(o.orlcp);
     testOutFile(o.otsv);
+    if (!o.fmdFile.empty())
+        testInFile(o.fmdFile);
 }
 
 int main(const int argc, const char*argv[]) {
@@ -226,8 +231,35 @@ int main(const int argc, const char*argv[]) {
             exit(1);
         }
         if (mode == TeraLCP::RunLCPMode::thresholds) {
-            std::string base = o.otsv;
-            ourIndex.writeThresholds(base, o.threshbound);
+            std::string fmdPath;
+            if (o.inputFormat == options::fmd) {
+                fmdPath = o.inputFile;
+            } else {
+                if (o.fmdFile.empty()) {
+                    std::cerr << "ERROR: thresholds mode with -f lcp_index requires --fmd FILE (FMD matching the index)\n";
+                    exit(1);
+                }
+                fmdPath = o.fmdFile;
+            }
+            rb3_fmi_t fmiThr;
+            rb3_fmi_restore(&fmiThr, fmdPath.c_str(), o.mmap);
+            if (fmiThr.e == nullptr && fmiThr.r == nullptr) {
+                std::cerr << "ERROR: failed to load FMD from '" << fmdPath << "' for thresholds\n";
+                exit(1);
+            }
+            if (!TeraLCP::validateRB3(&fmiThr)) {
+                std::cerr << "ERROR: invalid FMD (multirope or corrupted)\n";
+                rb3_fmi_free(&fmiThr);
+                exit(1);
+            }
+            TeraLCP::RunInfo runInfo = TeraLCP::runInfoFromFMD(&fmiThr);
+            rb3_fmi_free(&fmiThr);
+            try {
+                ourIndex.writeThresholds(o.otsv, o.threshbound, runInfo);
+            } catch (const std::exception& e) {
+                std::cerr << "ERROR: " << e.what() << std::endl;
+                exit(1);
+            }
         } else {
             std::ofstream runLcpOut(o.otsv);
             if (!runLcpOut.is_open()) {
