@@ -5,10 +5,12 @@
 
 #include <fstream>
 #include <iostream>
+#include <numeric>
 #include <string>
 #include <vector>
 
 #include "TeraLCP/TeraLCP.h"
+#include "fm-index.h"
 #include "util/util.h"
 
 namespace { // anonymous namespace for internal structs/functions
@@ -16,9 +18,11 @@ namespace { // anonymous namespace for internal structs/functions
 struct Options {
     std::string inputFile;
     std::string outputFile;
+    std::string fmdFile;
     std::string mode = "top";
     bool header = false;
     bool thresholdsBoundary = false;
+    bool fmdMmap = false;
 };
 
 void printUsage() {
@@ -26,9 +30,11 @@ void printUsage() {
         << "RunLCP emits per-run LCP summaries/listings from a TeraLCP index.\n"
         << "In '--mode thresholds', it outputs MONI-style .thr and .thr_pos files.\n\n"
         << "Usage: RunLCP -i <input.lcp_index> [-o output.tsv] [--mode MODE] [--header]\n"
-        << "              [--boundary]\n\n"
+        << "              [--boundary] [--fmd FILE] [--mmap]\n\n"
         << "Options:\n"
         << "  -i FILE       Input LCP index file produced by TeraLCP\n"
+        << "  --fmd FILE   (thresholds only, required) FMD file matching the lcp_index.\n"
+        << "                Run info is read from FMD to reduce memory (avoids Psi inversion).\n"
         << "  -o FILE       Output TSV file (default: stdout).\n"
         << "                For --mode thresholds, -o is mandatory and output goes to\n"
         << "                FILE.thr and FILE.thr_pos\n"
@@ -46,6 +52,7 @@ void printUsage() {
         << "                For thresholds: writes base.thr and base.thr_pos (requires -o as base path)\n"
         << "                all and sample: rows in reverse run order (highest id first); use id col\n"
         << "  --boundary    (thresholds only) Prefer thr_pos at top of a run when minimal\n"
+        << "  --mmap        (thresholds only) Use mmap when loading FMD\n"
         << "  --header      Print a header row (always on for writeRunLCP modes)\n"
         << "  -h, --help    Show this help message\n";
 }
@@ -66,10 +73,12 @@ Options parseOptions(int argc, const char* argv[]) {
 
     options.inputFile = getArg("-i", true, true);
     options.outputFile = getArg("-o", false, true);
+    options.fmdFile = getArg("--fmd", false, true);
     options.mode = getArg("--mode", false, true);
     if (options.mode.empty()) options.mode = "top";
     options.header = (getArg("--header", false, false) != "");
     options.thresholdsBoundary = (getArg("--boundary", false, false) != "");
+    options.fmdMmap = (getArg("--mmap", false, false) != "");
 
     for (int i = 0; i < argc; ++i) {
         if (!used[i]) {
@@ -82,6 +91,9 @@ Options parseOptions(int argc, const char* argv[]) {
     testInFile(options.inputFile);
     if (!options.outputFile.empty()) {
         testOutFile(options.outputFile);
+    }
+    if (!options.fmdFile.empty()) {
+        testInFile(options.fmdFile);
     }
     return options;
 }
@@ -103,12 +115,34 @@ int main(int argc, const char* argv[]) {
     TeraLCP index(options.inputFile);
 
     if (mode == TeraLCP::RunLCPMode::thresholds) {
-        // Handle thresholds mode
+        // Handle thresholds mode (requires --fmd: run info from FMD only)
         if (options.outputFile.empty()) {
             std::cerr << "ERROR: thresholds mode requires -o BASE (writes BASE.thr and BASE.thr_pos)\n";
             return 1;
         }
-        index.writeThresholds(options.outputFile, options.thresholdsBoundary);
+        if (options.fmdFile.empty()) {
+            std::cerr << "ERROR: thresholds mode requires --fmd FILE (FMD matching the lcp_index)\n";
+            return 1;
+        }
+        rb3_fmi_t fmi;
+        rb3_fmi_restore(&fmi, options.fmdFile.c_str(), options.fmdMmap ? 1 : 0);
+        if (fmi.e == nullptr && fmi.r == nullptr) {
+            std::cerr << "ERROR: failed to load FMD from '" << options.fmdFile << "'\n";
+            return 1;
+        }
+        if (!TeraLCP::validateRB3(&fmi)) {
+            std::cerr << "ERROR: invalid FMD (multirope or corrupted)\n";
+            rb3_fmi_free(&fmi);
+            return 1;
+        }
+        TeraLCP::RunInfo runInfo = TeraLCP::runInfoFromFMD(&fmi);
+        rb3_fmi_free(&fmi);
+        try {
+            index.writeThresholds(options.outputFile, options.thresholdsBoundary, runInfo);
+        } catch (const std::exception& e) {
+            std::cerr << "ERROR: " << e.what() << "\n";
+            return 1;
+        }
         return 0;
     }
 

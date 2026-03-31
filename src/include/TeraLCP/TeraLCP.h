@@ -15,6 +15,7 @@
 #include<fstream>
 #include<cstring>
 #include<cstdio>
+#include<numeric>
 
 static constexpr const char* lcp_index_extension = ".lcp_index";
 
@@ -1937,7 +1938,7 @@ class TeraLCP {
             break;
         }
         case RunLCPMode::thresholds:
-            throw std::logic_error("thresholds mode uses writeThresholds(basePath), not writeRunLCP");
+            throw std::logic_error("thresholds mode uses writeThresholds(basePath, boundaryMode, runInfoFromFMD), not writeRunLCP");
         case RunLCPMode::sample: {
             out << "id\tlength\ttop_lcp\tmin_lcp\tsampled_pairs\n";
             std::vector<uint64_t> topLCPs(runs);
@@ -1982,6 +1983,12 @@ class TeraLCP {
         }
     }
 
+    // RunInfo holds per-run lengths and run symbols (alphabet codes) in BWT order.
+    struct RunInfo {
+        std::vector<uint64_t> lengths;
+        std::vector<uint64_t> symbols;
+    };
+
     /**
      * Writes .thr and .thr_pos binary files as specified in thr_spec.md using
      * the provided basePath (without extension). Output files will be
@@ -1995,16 +2002,34 @@ class TeraLCP {
      * boundaryMode: when true, prefer thr_pos at the top of a run (subject to
      * correctness: thr_pos in [earliest_min_pos, latest_min_pos]).
      *
+     * runInfo must come from runInfoFromFMD() on the FMD matching this index
+     * (same BWT runs as the lcp_index).
+     *
      * Uses phiWalkLCP for the LCP traversal. Creates a temporary file
      * basePath.thr_tmp (which is removed after writing).
      */
-    void writeThresholds(const std::string& basePath, bool boundaryMode = false) const {
+    void writeThresholds(const std::string& basePath, bool boundaryMode, const RunInfo& runInfo) const {
+        if (runInfo.lengths.size() != F.size()) {
+            throw std::runtime_error("writeThresholds: FMD run count (" + std::to_string(runInfo.lengths.size())
+                + ") != lcp_index run count (" + std::to_string(F.size())
+                + "). FMD and lcp_index may be from different inputs.");
+        }
+        uint64_t fmdTotal = std::accumulate(runInfo.lengths.begin(), runInfo.lengths.end(), 0ULL);
+        if (fmdTotal != totalLen) {
+            throw std::runtime_error("writeThresholds: FMD total length (" + std::to_string(fmdTotal)
+                + ") != lcp_index total length (" + std::to_string(totalLen)
+                + "). FMD and lcp_index may be from different inputs.");
+        }
+        writeThresholdsImpl(basePath, boundaryMode, runInfo);
+    }
+
+private:
+    void writeThresholdsImpl(const std::string& basePath, bool boundaryMode, const RunInfo& runInfo) const {
         constexpr size_t THRBYTES = 5;
         constexpr size_t RECORDBYTES = 2 * THRBYTES;
         const uint64_t runs = F.size();
         if (runs == 0) return;
 
-        RunInfo runInfo = buildRunInfo();
         const std::vector<uint64_t>& runLen = runInfo.lengths;
         const std::vector<uint64_t>& symbols = runInfo.symbols;
         if (symbols.size() != runs || runLen.size() != runs)
@@ -2153,6 +2178,7 @@ class TeraLCP {
         std::remove(tmpPath.c_str());
     }
 
+public:
     void printRaw(const sdsl::int_vector<>& intAtTop) const {
         std::cout << "LCP\n";
         std::vector<uint64_t> lcp(totalLen);
@@ -2178,12 +2204,6 @@ class TeraLCP {
         }
         std::cout << "\n";
     }
-
-    // RunInfo holds per-run lengths and run symbols (alphabet codes) in BWT order.
-    struct RunInfo {
-        std::vector<uint64_t> lengths;
-        std::vector<uint64_t> symbols;
-    };
 
     /**
      * Performs the Phi walk and invokes callback(pos, val) for each BWT
@@ -2218,73 +2238,24 @@ class TeraLCP {
         }
     }
 
-    // buildRunInfo reconstructs run lengths and run symbols from the stored Psi/F tables.
-    RunInfo buildRunInfo() const {
-        sdsl::int_vector<> pi, invPi;
-        MoveStructureTable LF;
-        std::tie(LF, pi, invPi) = Psi.invertAndRetPiInvPi();
-
-        const uint64_t numRuns = LF.data.size();
-        std::vector<uint64_t> runLengths(numRuns);
-        for (uint64_t i = 0; i < numRuns; ++i) {
-            runLengths[i] = LF.get_length(i);
+    /**
+     * Extracts RunInfo (lengths and symbols in BWT order) from an open FMD.
+     * rld_dec yields runs in BWT order, so a single pass suffices.
+     * Caller must ensure rb3 is valid (e.g., validateRB3) and has e != nullptr.
+     */
+    static RunInfo runInfoFromFMD(const rb3_fmi_t* rb3) {
+        if (!rb3 || !rb3->e) {
+            throw std::runtime_error("runInfoFromFMD: invalid or multirope FMD (e is null)");
         }
-
-        auto pointToInt = [numRuns](MoveStructureTable::IntervalPoint a) -> uint64_t {
-            return a.interval + a.offset * numRuns;
-        };
-
-        uint64_t numSequences = 0;
-        while (numSequences < numRuns && F[numSequences] == 0) {
-            ++numSequences;
-        }
-        if (numSequences == 0 || numSequences == numRuns) {
-            throw std::runtime_error("Failed to infer number of sequences from F.");
-        }
-
-        std::vector<uint64_t> rlbwt(numRuns, 0);
-        std::unordered_map<uint64_t, uint64_t> currentStarts;
-
-        MoveStructureTable::IntervalPoint p{static_cast<uint64_t>(-1), 0, numSequences}, start;
-        while (p.interval < numRuns && p.offset >= LF.data.get<2>(p.interval)) {
-            p.offset -= LF.data.get<2>(p.interval++);
-        }
-        start = p;
-        for (uint64_t i = numSequences; i < numRuns; ++i) {
-            while (p.interval < numRuns && p.offset >= LF.data.get<2>(p.interval)) {
-                p.offset -= LF.data.get<2>(p.interval++);
-            }
-            if (F[i] != F[i - 1]) {
-                currentStarts[pointToInt(p)] = F[i];
-            }
-            p.offset += Psi.data.get<2>(i);
-        }
-
-        for (uint64_t i = 0; i < numRuns; ++i) {
-            auto lfPoint = LF.map({static_cast<uint64_t>(-1), i, 0});
-            if (lfPoint.interval < start.interval || (lfPoint.interval == start.interval && lfPoint.offset < start.offset)) {
-                rlbwt[i] = 0;
-            } else {
-                auto key = pointToInt(lfPoint);
-                if (currentStarts.find(key) == currentStarts.end()) {
-                    throw std::runtime_error("Failed to resolve BWT run character.");
-                }
-                rlbwt[i] = currentStarts[key];
-                currentStarts.erase(key);
-            }
-            lfPoint.offset += LF.data.get<2>(i);
-            while (lfPoint.interval < numRuns && lfPoint.offset >= LF.data.get<2>(lfPoint.interval)) {
-                lfPoint.offset -= LF.data.get<2>(lfPoint.interval++);
-            }
-            if (lfPoint.interval == numRuns && lfPoint.offset != 0) {
-                throw std::runtime_error("Invalid LF mapping while reconstructing BWT runs.");
-            }
-            currentStarts[pointToInt(lfPoint)] = rlbwt[i];
-        }
-
         RunInfo info;
-        info.lengths = std::move(runLengths);
-        info.symbols = std::move(rlbwt);
+        rlditr_t itr;
+        rld_itr_init(rb3->e, &itr, 0);
+        int c = 0;
+        int64_t l;
+        while ((l = rld_dec(rb3->e, &itr, &c, 0)) > 0) {
+            info.lengths.push_back(static_cast<uint64_t>(l));
+            info.symbols.push_back(static_cast<uint64_t>(c));
+        }
         return info;
     }
 
