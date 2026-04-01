@@ -2240,7 +2240,8 @@ public:
 
     /**
      * Extracts RunInfo (lengths and symbols in BWT order) from an open FMD.
-     * rld_dec yields runs in BWT order, so a single pass suffices.
+     * Matches ConstructPsi / lcp_index: raw rld_dec runs with symbol 0 (sentinel)
+     * are split into L runs of length 1 each; other symbols stay one run per decode.
      * Caller must ensure rb3 is valid (e.g., validateRB3) and has e != nullptr.
      */
     static RunInfo runInfoFromFMD(const rb3_fmi_t* rb3) {
@@ -2253,8 +2254,15 @@ public:
         int c = 0;
         int64_t l;
         while ((l = rld_dec(rb3->e, &itr, &c, 0)) > 0) {
-            info.lengths.push_back(static_cast<uint64_t>(l));
-            info.symbols.push_back(static_cast<uint64_t>(c));
+            if (c == 0) {
+                for (uint64_t i = 0; i < static_cast<uint64_t>(l); ++i) {
+                    info.lengths.push_back(1);
+                    info.symbols.push_back(0);
+                }
+            } else {
+                info.lengths.push_back(static_cast<uint64_t>(l));
+                info.symbols.push_back(static_cast<uint64_t>(c));
+            }
         }
         return info;
     }
