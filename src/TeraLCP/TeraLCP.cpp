@@ -39,6 +39,7 @@ void printUsage() {
         "    -p          INT                             optional       Limit the program to (nonnegative) INT threads. By default uses maximum available. Maximum on this hardware is " << omp_get_max_threads() << "\n"
         "    -chunk      INT                             optional       Chunk size for OpenMP dynamic scheduling (default 1)\n"
         "    -mmap                                       optional       read input using memory mapping (only avaiable for fmd) default: no memory mapping\n"
+        "    -progress, --progress                       optional       During -otsv phi-based modes, print ~1% progress steps to stderr\n"
         #ifndef BENCHFASTONLY
         "    -v          [quiet,time,verb]               optional       Verbosity, verb for most verbose output, time for timer info, and quiet for no output. time is default.\n"
         #else
@@ -61,6 +62,7 @@ struct options{
     unsigned numThreads = omp_get_max_threads();
     uint64_t chunkSize = 1;
     bool mmap;
+    bool phiWalkProgress = false;
     bool threshbound = false;
     #ifndef BENCHFASTONLY
     verbosity v = TIME;
@@ -109,6 +111,7 @@ void processOptions(const int argc, const char* argv[]) {
     if (s != "")
         o.chunkSize = std::stoull(s);
     o.mmap = ("-mmap" == getArg("-mmap", false, false));
+    o.phiWalkProgress = (getArg("--progress", false, false) != "" || getArg("-progress", false, false) != "");
 #ifndef BENCHFASTONLY
     s = getArg("-v", false, true);
     if (s == "quiet")
@@ -143,6 +146,45 @@ void processOptions(const int argc, const char* argv[]) {
         testInFile(o.fmdFile);
 }
 
+// Builds an in-memory ropeBWT3 rld (FMD) from a run-length BWT given as Movi-style
+// companion files BASE.bwt.heads (1 byte per run) and BASE.bwt.len (5-byte LE per
+// run). Distinct head bytes are remapped to codes 0..k-1 in ascending byte order,
+// so the smallest byte (e.g. the 0 sentinel) becomes code 0 and is treated as the
+// endmarker by ConstructPsi/runInfoFromFMD -- matching the byte collation used to
+// build the BWT (e.g. libsais/divsufsort on Movi's %-separated text). This lets
+// TeraLCP ingest BWTs over a non-DNA alphabet (e.g. with a '%' separator) that the
+// ropeBWT3 builder cannot represent.
+static rld_t* buildRldFromRlbwt(const std::string& base) {
+    const std::string headsPath = base + ".bwt.heads", lenPath = base + ".bwt.len";
+    std::ifstream hf(headsPath, std::ios::binary), lf(lenPath, std::ios::binary);
+    if (!hf.is_open()) { std::cerr << "ERROR: cannot open " << headsPath << "\n"; std::exit(1); }
+    if (!lf.is_open()) { std::cerr << "ERROR: cannot open " << lenPath << "\n"; std::exit(1); }
+    std::vector<unsigned char> heads((std::istreambuf_iterator<char>(hf)),
+                                      std::istreambuf_iterator<char>());
+    const uint64_t runs = heads.size();
+    if (runs == 0) { std::cerr << "ERROR: empty heads file " << headsPath << "\n"; std::exit(1); }
+    std::vector<int> present(256, 0);
+    for (unsigned char b : heads) present[b] = 1;
+    std::vector<int> code(256, -1);
+    int k = 0;
+    for (int b = 0; b < 256; ++b) if (present[b]) code[b] = k++;
+    if (k > RB3_ASIZE) {
+        std::cerr << "ERROR: RLBWT alphabet size " << k << " exceeds RB3_ASIZE (" << RB3_ASIZE << ")\n";
+        std::exit(1);
+    }
+    rld_t* e = rld_init(RB3_ASIZE, 3);
+    rlditr_t ei;
+    rld_itr_init(e, &ei, 0);
+    for (uint64_t i = 0; i < runs; ++i) {
+        uint64_t L = 0;
+        lf.read(reinterpret_cast<char*>(&L), 5);
+        if (!lf) { std::cerr << "ERROR: " << lenPath << " has fewer than " << runs << " run lengths\n"; std::exit(1); }
+        rld_enc(e, &ei, static_cast<int64_t>(L), static_cast<uint8_t>(code[heads[i]]));
+    }
+    rld_enc_finish(e, &ei);
+    return e;
+}
+
 int main(const int argc, const char*argv[]) {
     processOptions(argc, argv);
     omp_set_num_threads(o.numThreads);
@@ -155,8 +197,9 @@ int main(const int argc, const char*argv[]) {
         #ifndef BENCHFASTONLY
         if (o.v >= TIME) { Timer.start("Reading Arguments"); }
         #endif
-        if (o.inputFormat != options::fmd && o.inputFormat != options::lcp_index) {
-            std::cerr << "Only fmd and lcp_index input currently implemented!" << std::endl;
+        if (o.inputFormat != options::fmd && o.inputFormat != options::rlbwt
+                && o.inputFormat != options::lcp_index) {
+            std::cerr << "Only fmd, rlbwt, and lcp_index input currently implemented!" << std::endl;
             exit(1);
         }
         #ifndef BENCHFASTONLY
@@ -182,13 +225,27 @@ int main(const int argc, const char*argv[]) {
                 exit(1);
             }
         }
+        else if (o.inputFormat == options::rlbwt) {
+            #ifndef BENCHFASTONLY
+            if (o.v >= TIME) { Timer.start("Building FMD from RLBWT heads/len"); }
+            #endif
+            rb3_fmi_init(&fmi, buildRldFromRlbwt(o.inputFile), 0);
+            fmi.ssa = 0; fmi.sid = 0;
+            #ifndef BENCHFASTONLY
+            if (o.v >= TIME) { Timer.stop(); }
+            #endif
+            if (!TeraLCP::validateRB3(&fmi)) {
+                std::cerr << "ERROR: failed to build FMD from RLBWT '" << o.inputFile << "'" << std::endl;
+                exit(1);
+            }
+        }
     }
     #ifndef BENCHFASTONLY
     if (o.v >= TIME) { Timer.stop(); } //Program Initialization 
     #endif
 
     TeraLCP ourIndex;
-    if (o.inputFormat == options::fmd) {
+    if (o.inputFormat == options::fmd || o.inputFormat == options::rlbwt) {
         #ifndef BENCHFASTONLY
         if (o.v >= TIME) { Timer.start("LCP index construction"); }
         #endif
@@ -241,35 +298,71 @@ int main(const int argc, const char*argv[]) {
             std::cerr << "ERROR: " << e.what() << std::endl;
             exit(1);
         }
+        ourIndex.setPhiWalkProgressEnabled(o.phiWalkProgress);
         if (mode == TeraLCP::RunLCPMode::thresholds) {
-            std::string fmdPath;
-            if (o.inputFormat == options::fmd) {
-                fmdPath = o.inputFile;
+            TeraLCP::RunInfo runInfo;
+            if (o.inputFormat == options::rlbwt) {
+                // The index constructor freed the fmi we built; rebuild a fresh rld
+                // from the same heads/len files to read run metadata.
+                rb3_fmi_t fmiThr;
+                rb3_fmi_init(&fmiThr, buildRldFromRlbwt(o.inputFile), 0);
+                fmiThr.ssa = 0; fmiThr.sid = 0;
+                runInfo = TeraLCP::runInfoFromFMD(&fmiThr);
+                rb3_fmi_free(&fmiThr);
             } else {
-                if (o.fmdFile.empty()) {
-                    std::cerr << "ERROR: thresholds mode with -f lcp_index requires --fmd FILE (FMD matching the index)\n";
+                std::string fmdPath;
+                if (o.inputFormat == options::fmd) {
+                    fmdPath = o.inputFile;
+                } else {
+                    if (o.fmdFile.empty()) {
+                        std::cerr << "ERROR: thresholds mode with -f lcp_index requires --fmd FILE (FMD matching the index)\n";
+                        exit(1);
+                    }
+                    fmdPath = o.fmdFile;
+                }
+                if (o.phiWalkProgress) {
+                    std::cerr << "[TeraLCP] loading FMD for thresholds run metadata: " << fmdPath << "\n" << std::flush;
+                }
+                rb3_fmi_t fmiThr;
+                rb3_fmi_restore(&fmiThr, fmdPath.c_str(), o.mmap);
+                if (fmiThr.e == nullptr && fmiThr.r == nullptr) {
+                    std::cerr << "ERROR: failed to load FMD from '" << fmdPath << "' for thresholds\n";
                     exit(1);
                 }
-                fmdPath = o.fmdFile;
-            }
-            rb3_fmi_t fmiThr;
-            rb3_fmi_restore(&fmiThr, fmdPath.c_str(), o.mmap);
-            if (fmiThr.e == nullptr && fmiThr.r == nullptr) {
-                std::cerr << "ERROR: failed to load FMD from '" << fmdPath << "' for thresholds\n";
-                exit(1);
-            }
-            if (!TeraLCP::validateRB3(&fmiThr)) {
-                std::cerr << "ERROR: invalid FMD (multirope or corrupted)\n";
+                if (!TeraLCP::validateRB3(&fmiThr)) {
+                    std::cerr << "ERROR: invalid FMD (multirope or corrupted)\n";
+                    rb3_fmi_free(&fmiThr);
+                    exit(1);
+                }
+                runInfo = TeraLCP::runInfoFromFMD(&fmiThr);
                 rb3_fmi_free(&fmiThr);
-                exit(1);
             }
-            TeraLCP::RunInfo runInfo = TeraLCP::runInfoFromFMD(&fmiThr);
-            rb3_fmi_free(&fmiThr);
             try {
-                ourIndex.writeThresholds(o.otsv, o.threshbound, runInfo);
+                // Fast path: fuse threshold capture into the parallel per-run
+                // traversal. It is destructive (frees Phi/Psi/PLCPsamples), so if
+                // -orlcp is also requested (which needs those structures) fall back
+                // to the non-destructive phi-walk path.
+                if (o.orlcp == "") {
+                    ourIndex.writeThresholdsParallel(o.otsv, o.threshbound, runInfo, o.v);
+                } else {
+                    ourIndex.writeThresholds(o.otsv, o.threshbound, runInfo);
+                }
             } catch (const std::exception& e) {
                 std::cerr << "ERROR: " << e.what() << std::endl;
                 exit(1);
+            }
+            // Emit Movi-compatible run-length BWT companion files (.bwt.heads,
+            // .bwt.len) in the same run partition as the thresholds, so a Movi
+            // index can be built from the ropeBWT3 BWT + Tera thresholds. Skipped
+            // for -f rlbwt input, where the heads/len already exist (the input)
+            // and the code->char map would not match the remapped alphabet.
+            if (o.inputFormat != options::rlbwt) {
+                try {
+                    ourIndex.writeBwtHeadsLen(o.otsv, runInfo);
+                } catch (const std::exception& e) {
+                    std::cerr << "ERROR: " << e.what() << std::endl;
+                    exit(1);
+                }
             }
         } else {
             std::ofstream runLcpOut(o.otsv);
