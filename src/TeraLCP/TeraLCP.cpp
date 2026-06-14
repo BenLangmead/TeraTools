@@ -19,6 +19,10 @@ void printUsage() {
         "  Output:\n"
         "    -oindex     FILE                            optional       Output constructed index to FILE" << lcp_index_extension << "\n"
         "    -orlcp      FILE                            optional       Output (position, minLCP) pairs per run to FILE" << rlcp_extension << "\n"
+        "    -othresholds BASE                           optional       Output Movi-compatible thresholds to BASE.thr and BASE.thr_pos,\n"
+        "                                                              plus run-length BWT files BASE.bwt.heads and BASE.bwt.len\n"
+        "    -threshbound                                optional       (-othresholds) prefer a run-boundary row for thr_pos within the min range\n"
+        "    --fmd       FILE                            optional       (-othresholds with -f lcp_index) FMD matching the index, for run metadata\n"
         "\n"
         "  Behavior:\n"
         "    -p          INT                             optional       Limit the program to (nonnegative) INT threads. By default uses maximum available. Maximum on this hardware is " << omp_get_max_threads() << "\n"
@@ -41,7 +45,8 @@ void printUsage() {
 
 struct options{
     enum inputFormat { text, bwt, rlbwt, fmd, lcp_index }inputFormat;
-    std::string inputFile, tempFile, oindex="", orlcp="";
+    std::string inputFile, tempFile, oindex="", orlcp="", othresholds="", fmdFile="";
+    bool threshbound = false;
     unsigned numThreads = omp_get_max_threads();
     bool mmap;
     #ifndef BENCHFASTONLY
@@ -79,6 +84,9 @@ void processOptions(const int argc, const char* argv[]) {
     o.orlcp = getArg("-orlcp", false, true);
     if (o.orlcp != "")
         o.orlcp += rlcp_extension;
+    o.othresholds = getArg("-othresholds", false, true);
+    o.threshbound = (getArg("-threshbound", false, false) != "");
+    o.fmdFile = getArg("--fmd", false, true);
     s = getArg("-p", false, true);
     if (s != "")
         o.numThreads = std::stoul(s);
@@ -112,6 +120,8 @@ void processOptions(const int argc, const char* argv[]) {
     testOutFile(o.tempFile);
     testOutFile(o.oindex);
     testOutFile(o.orlcp);
+    if (!o.fmdFile.empty())
+        testInFile(o.fmdFile);
 }
 
 int main(const int argc, const char*argv[]) {
@@ -174,6 +184,50 @@ int main(const int argc, const char*argv[]) {
     }
     else if (o.inputFormat == options::lcp_index) {
         ourIndex = TeraLCP(o.inputFile, o.v);
+    }
+
+    // Movi-compatible thresholds (BASE.thr, BASE.thr_pos) plus the run-length BWT
+    // companion files (BASE.bwt.heads, BASE.bwt.len). Run metadata is read from
+    // the FMD (the index constructor frees the one used for construction, so we
+    // reload it here). The fast path fuses threshold capture into the parallel
+    // per-run pass and is destructive; fall back to the non-destructive phi-walk
+    // path when -oindex or -orlcp still needs the in-memory index.
+    if (o.othresholds != "") {
+        #ifndef BENCHFASTONLY
+        if (o.v >= TIME) { Timer.start("thresholds output"); }
+        #endif
+        std::string fmdPath = (o.inputFormat == options::fmd) ? o.inputFile : o.fmdFile;
+        if (fmdPath.empty()) {
+            std::cerr << "ERROR: -othresholds with -f lcp_index requires --fmd FILE (FMD matching the index)\n";
+            exit(1);
+        }
+        rb3_fmi_t fmiThr;
+        rb3_fmi_restore(&fmiThr, fmdPath.c_str(), o.mmap);
+        if (fmiThr.e == nullptr && fmiThr.r == nullptr) {
+            std::cerr << "ERROR: failed to load FMD from '" << fmdPath << "' for thresholds\n";
+            exit(1);
+        }
+        if (!TeraLCP::validateRB3(&fmiThr)) {
+            std::cerr << "ERROR: invalid FMD (multirope or corrupted) for thresholds\n";
+            rb3_fmi_free(&fmiThr);
+            exit(1);
+        }
+        TeraLCP::RunInfo runInfo = TeraLCP::runInfoFromFMD(&fmiThr);
+        rb3_fmi_free(&fmiThr);
+        const bool needIndexLater = (o.oindex != "" || o.orlcp != "");
+        try {
+            if (needIndexLater)
+                ourIndex.writeThresholds(o.othresholds, o.threshbound, runInfo);
+            else
+                ourIndex.writeThresholdsParallel(o.othresholds, o.threshbound, runInfo, o.v);
+            ourIndex.writeBwtHeadsLen(o.othresholds, runInfo);
+        } catch (const std::exception& e) {
+            std::cerr << "ERROR: " << e.what() << std::endl;
+            exit(1);
+        }
+        #ifndef BENCHFASTONLY
+        if (o.v >= TIME) { Timer.stop(); } //thresholds output
+        #endif
     }
 
 
