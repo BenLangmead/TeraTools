@@ -41,12 +41,27 @@ Each `<case>/` directory holds the input FASTA and the pfp-thresholds goldens:
 - `gattacat` — small repetitive sequence (117 runs).
 - `shred1_mini` — shredded reads (~14.9k runs), a larger non-trivial case.
 
-## Broader validation
+## Broader validation (cross-tool reproducers)
 
-Beyond these dependency-free checks, the threshold output and the `-f rlbwt`
-ingest were validated end-to-end against external tools during development (not
-required to run the tests here): a Movi index built from TeraLCP's output yields
-pseudo-matching lengths identical to the pfp-based pipeline, and a compressed-space
-byte-alphabet BWT builder (grlBWT) fed through `-f rlbwt` yields Movi `--separators`
-count queries identical to the pfp-based pipeline. See the pull request description
-for details.
+Beyond these dependency-free checks, two guarded reproducers validate the threshold
+output and `-f rlbwt` ingest end-to-end against external tools. They are **not** part
+of `make test`: they depend on tools this repo does not own (Movi, grlBWT), so they
+SKIP (exit 0) when those are absent. Set `MOVI=/path/to/movi` and, for the separator
+path, `GRLBWT_DIR=/path/to/grlBWT/build`.
+
+```
+MOVI=… GRLBWT_DIR=… bash test/validate_against_movi.sh        # all query modes
+MOVI=… GRLBWT_DIR=… bash test/corner/run_corner_tests.sh      # separator corner cases
+```
+
+- **`test/validate_against_movi.sh`** builds a Movi index from TeraLCP's output and
+  diffs every major Movi query mode against a stock pfp/NPTM index, in two regimes:
+  no-separator (ropeBWT3) and separator (grlBWT). Modes covered: `--pml`, `--count`,
+  `--kmer`, and `--mem`. The last two reach Movi's **bidirectional** move-structure
+  search (there is no standalone bidirectional flag — see
+  [`MOVI_QUERY_MODES.md`](MOVI_QUERY_MODES.md)). The grlBWT path uses the
+  `grlbwt2teralcp` adapter (built by `make -C src/TeraLCP tools`).
+- **`test/corner/run_corner_tests.sh`** drives small adversarial fixtures that the
+  main reproducer cannot reach (boundary-spanning queries, identical records, sub-k
+  records, N-runs), confirming Tera-built == NPTM for each. These exercise correct
+  separator/terminator handling: a boundary-spanning match must not cross a separator.

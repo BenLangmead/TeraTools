@@ -1,8 +1,8 @@
 SHELL := /bin/bash
 
-all: TeraLCP
+all: TeraLCP tools
 
-.PHONY: all clean test testIndexOnly test-thresholds
+.PHONY: all clean test testIndexOnly test-thresholds tools
 
 numIterRand=10
 
@@ -40,8 +40,14 @@ ifneq ($(omp),0)
 	libs+=-fopenmp
 endif
 
+# Small, dependency-free helper tools (no SDSL/ropebwt3 link).
+tools: tools/grlbwt2teralcp
+
+tools/grlbwt2teralcp: tools/grlbwt2teralcp.cpp
+	$(CXX) -Wall -Wextra -O3 -std=c++11 $< -o $@
+
 clean:
-	-rm TeraLCP
+	-rm TeraLCP tools/grlbwt2teralcp
 
 testIndexOnly: TeraLCP
 	set -e && \
