@@ -23,6 +23,7 @@ struct Options {
     bool header = false;
     bool thresholdsBoundary = false;
     bool fmdMmap = false;
+    bool progress = false;
 };
 
 void printUsage() {
@@ -53,6 +54,7 @@ void printUsage() {
         << "                all and sample: rows in reverse run order (highest id first); use id col\n"
         << "  --boundary    (thresholds only) Prefer thr_pos at top of a run when minimal\n"
         << "  --mmap        (thresholds only) Use mmap when loading FMD\n"
+        << "  --progress    Print phi-walk / thresholds progress (~1% steps) to stderr\n"
         << "  --header      Print a header row (always on for writeRunLCP modes)\n"
         << "  -h, --help    Show this help message\n";
 }
@@ -79,6 +81,7 @@ Options parseOptions(int argc, const char* argv[]) {
     options.header = (getArg("--header", false, false) != "");
     options.thresholdsBoundary = (getArg("--boundary", false, false) != "");
     options.fmdMmap = (getArg("--mmap", false, false) != "");
+    options.progress = (getArg("--progress", false, false) != "" || getArg("-progress", false, false) != "");
 
     for (int i = 0; i < argc; ++i) {
         if (!used[i]) {
@@ -111,8 +114,12 @@ int main(int argc, const char* argv[]) {
         return 1;
     }
 
+    if (options.progress) {
+        std::cerr << "[RunLCP] loading lcp_index: " << options.inputFile << "\n" << std::flush;
+    }
     // Load LCP index: F (run-length BWT), Psi, Phi, intAtTop, PLCPsamples.
     TeraLCP index(options.inputFile);
+    index.setPhiWalkProgressEnabled(options.progress);
 
     if (mode == TeraLCP::RunLCPMode::thresholds) {
         // Handle thresholds mode (requires --fmd: run info from FMD only)
@@ -123,6 +130,9 @@ int main(int argc, const char* argv[]) {
         if (options.fmdFile.empty()) {
             std::cerr << "ERROR: thresholds mode requires --fmd FILE (FMD matching the lcp_index)\n";
             return 1;
+        }
+        if (options.progress) {
+            std::cerr << "[RunLCP] loading FMD for run metadata: " << options.fmdFile << "\n" << std::flush;
         }
         rb3_fmi_t fmi;
         rb3_fmi_restore(&fmi, options.fmdFile.c_str(), options.fmdMmap ? 1 : 0);

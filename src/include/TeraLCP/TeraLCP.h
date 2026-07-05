@@ -22,6 +22,8 @@ static constexpr const char* lcp_index_extension = ".lcp_index";
 class TeraLCP {
     uint64_t totalLen;
     uint64_t chunkSize_ = 1;
+    /** When true, phiWalkLCP and thresholds finalize print ~1% steps to stderr (see setPhiWalkProgressEnabled). */
+    mutable bool phiWalkProgressEnabled_ = false;
 
     sdsl::int_vector<> F;
     
@@ -1122,6 +1124,9 @@ class TeraLCP {
     public:
     typedef uint64_t size_type;
 
+    /** Enable periodic progress on stderr during phi walks and thresholds final BWT-order write (-progress / --progress in CLIs). */
+    void setPhiWalkProgressEnabled(bool enabled) { phiWalkProgressEnabled_ = enabled; }
+
     TeraLCP() = default;
 
 	// Constructor to assist with matching statistic computation
@@ -2160,6 +2165,10 @@ private:
             thrPosOut.write(outBuf, THRBYTES);
         };
 
+        uint64_t lastFinalizePct = 0;
+        if (phiWalkProgressEnabled_ && runs > 0) {
+            std::cerr << "[TeraLCP] thresholds finalize: 0%\n" << std::flush;
+        }
         for (uint64_t bwtRun = 0; bwtRun < runs; ++bwtRun) {
             uint64_t outThr, outPos;
             if (bwtRun == firstOccurrence[symbols[bwtRun]]) {
@@ -2172,6 +2181,13 @@ private:
                 std::memcpy(&outPos, buf + THRBYTES, THRBYTES);
             }
             writeOne(outThr, outPos);
+            if (phiWalkProgressEnabled_ && runs > 0) {
+                uint64_t pct = (bwtRun + 1) * 100 / runs;
+                if (pct > lastFinalizePct) {
+                    lastFinalizePct = pct;
+                    std::cerr << "[TeraLCP] thresholds finalize: " << pct << "%\n" << std::flush;
+                }
+            }
         }
 
         tmpIn.close();
@@ -2229,12 +2245,23 @@ public:
         uint64_t lenFirst = Phi.data.get<2>(phiPoint.interval + 1) - Phi.data.get<2>(phiPoint.interval);
         phiPoint.offset = (lenFirst > 0) ? (lenFirst - 1) : 0;
         phiPoint = Phi.map(phiPoint);
+        uint64_t lastPhiPct = 0;
+        if (phiWalkProgressEnabled_ && totalLen > 0) {
+            std::cerr << "[TeraLCP] phi walk: 0%\n" << std::flush;
+        }
         for (uint64_t i = 0; i < totalLen; ++i) {
             uint64_t plcpSample = PLCPsamples[phiPoint.interval];
             uint64_t val = (phiPoint.offset <= plcpSample) ? (plcpSample - phiPoint.offset) : 0;
             if (val > totalLen) val = 0;
             callback(totalLen - 1 - i, val);
             phiPoint = Phi.map(phiPoint);
+            if (phiWalkProgressEnabled_ && totalLen > 0) {
+                uint64_t pct = (i + 1) * 100 / totalLen;
+                if (pct > lastPhiPct) {
+                    lastPhiPct = pct;
+                    std::cerr << "[TeraLCP] phi walk: " << pct << "%\n" << std::flush;
+                }
+            }
         }
     }
 

@@ -39,6 +39,7 @@ void printUsage() {
         "    -p          INT                             optional       Limit the program to (nonnegative) INT threads. By default uses maximum available. Maximum on this hardware is " << omp_get_max_threads() << "\n"
         "    -chunk      INT                             optional       Chunk size for OpenMP dynamic scheduling (default 1)\n"
         "    -mmap                                       optional       read input using memory mapping (only avaiable for fmd) default: no memory mapping\n"
+        "    -progress, --progress                       optional       During -otsv phi-based modes, print ~1% progress steps to stderr\n"
         #ifndef BENCHFASTONLY
         "    -v          [quiet,time,verb]               optional       Verbosity, verb for most verbose output, time for timer info, and quiet for no output. time is default.\n"
         #else
@@ -61,6 +62,7 @@ struct options{
     unsigned numThreads = omp_get_max_threads();
     uint64_t chunkSize = 1;
     bool mmap;
+    bool phiWalkProgress = false;
     bool threshbound = false;
     #ifndef BENCHFASTONLY
     verbosity v = TIME;
@@ -109,6 +111,7 @@ void processOptions(const int argc, const char* argv[]) {
     if (s != "")
         o.chunkSize = std::stoull(s);
     o.mmap = ("-mmap" == getArg("-mmap", false, false));
+    o.phiWalkProgress = (getArg("--progress", false, false) != "" || getArg("-progress", false, false) != "");
 #ifndef BENCHFASTONLY
     s = getArg("-v", false, true);
     if (s == "quiet")
@@ -241,6 +244,7 @@ int main(const int argc, const char*argv[]) {
             std::cerr << "ERROR: " << e.what() << std::endl;
             exit(1);
         }
+        ourIndex.setPhiWalkProgressEnabled(o.phiWalkProgress);
         if (mode == TeraLCP::RunLCPMode::thresholds) {
             std::string fmdPath;
             if (o.inputFormat == options::fmd) {
@@ -251,6 +255,9 @@ int main(const int argc, const char*argv[]) {
                     exit(1);
                 }
                 fmdPath = o.fmdFile;
+            }
+            if (o.phiWalkProgress) {
+                std::cerr << "[TeraLCP] loading FMD for thresholds run metadata: " << fmdPath << "\n" << std::flush;
             }
             rb3_fmi_t fmiThr;
             rb3_fmi_restore(&fmiThr, fmdPath.c_str(), o.mmap);
