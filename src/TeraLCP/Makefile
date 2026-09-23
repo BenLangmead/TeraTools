@@ -2,7 +2,7 @@ SHELL := /bin/bash
 
 all: TeraLCP
 
-.PHONY: all clean test testIndexOnly test-thresholds
+.PHONY: all clean test testIndexOnly test-thresholds test-minima
 
 numIterRand=10
 
@@ -60,6 +60,10 @@ test: TeraLCP
 # Self-contained threshold tests (needs only TeraLCP + ropebwt3, both built here).
 test-thresholds: TeraLCP
 	bash ../../test/run_threshold_tests.sh
+
+# Self-contained -ominima tests (needs TeraLCP + ropebwt3, python3 and a C++ compiler).
+test-minima: TeraLCP
+	CXX="$(CXX)" bash ../../test/run_ms_minima_tests.sh
 
 $(objs): 
 	make -C $(ropebwt3dir)

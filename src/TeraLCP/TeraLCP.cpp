@@ -2,6 +2,8 @@
 #include"TeraLCP/TeraLCP.h"
 #include<sys/stat.h>
 #include<iterator>
+#include<memory>
+#include<algorithm>
 
 static constexpr const char* rlcp_extension = ".rlcp";
 
@@ -29,6 +31,13 @@ void printUsage() {
         "    --fmd       FILE                            optional       (-othresholds with -f lcp_index) FMD matching the index, for run metadata\n"
         "    --rlbwt-meta BASE                           optional       (-othresholds with -f lcp_index) grlBWT/rlbwt heads/len (BASE.bwt.heads/.bwt.len)\n"
         "                                                              for run metadata; use instead of --fmd to resume the separator pipeline\n"
+        "                                                              (-ominima with -f lcp_index) check the index's run numbering against BASE\n"
+        "    -ominima    FILE                            optional       Output, per BWT run, the top LCP and the prefix/suffix LCP minima used by\n"
+        "                                                              the ms matching-statistics index to FILE (format: src/TeraLCP/MS_MINIMA_FORMAT.md).\n"
+        "                                                              Temporary files FILE.tmp.* are written next to FILE. With -f rlbwt, exits with an\n"
+        "                                                              error if the index's run numbering would differ from the heads/len runs.\n"
+        "    --minima-bucket-mb N                        optional       (-ominima) RAM budget in MiB for reordering records into BWT order (default 2048;\n"
+        "                                                              --minima-bucket-kb N gives it in KiB)\n"
         "\n"
         "  Checkpoint/resume (construct, -f fmd):\n"
         "    -checkpoint DIR                             optional       Read/write per-phase checkpoints in DIR. On startup, resume from the\n"
@@ -58,7 +67,8 @@ void printUsage() {
 
 struct options{
     enum inputFormat { text, bwt, rlbwt, fmd, lcp_index }inputFormat;
-    std::string inputFile, tempFile, oindex="", orlcp="", othresholds="", fmdFile="", rlbwtMeta="";
+    std::string inputFile, tempFile, oindex="", orlcp="", othresholds="", fmdFile="", rlbwtMeta="", ominima="";
+    uint64_t minimaBucketBytes = 2048ULL << 20;   // --minima-bucket-mb (tests may pass --minima-bucket-kb)
     // Checkpoint/resume for construct: -checkpoint <dir> reads/writes per-phase
     // checkpoints; -stop-after A|B chunks a multi-week build across <=7-day jobs.
     std::string checkpointDir="";
@@ -129,6 +139,15 @@ void processOptions(const int argc, const char* argv[]) {
     // can checkpoint via -oindex and resume thresholds without ever building an FMD.
     o.rlbwtMeta = getArg("--rlbwt-meta", false, true);
 
+    o.ominima = getArg("-ominima", false, true);
+    {
+        std::string mb = getArg("--minima-bucket-mb", false, true);
+        std::string kb = getArg("--minima-bucket-kb", false, true);
+        if (!mb.empty()) o.minimaBucketBytes = static_cast<uint64_t>(std::stoull(mb)) << 20;
+        if (!kb.empty()) o.minimaBucketBytes = static_cast<uint64_t>(std::stoull(kb)) << 10;
+        if (o.minimaBucketBytes == 0) { std::cerr << "ERROR: --minima-bucket-mb must be positive\n"; exit(1); }
+    }
+
     s = getArg("-p", false, true);
     if (s != "")
         o.numThreads = std::stoul(s);
@@ -147,7 +166,7 @@ void processOptions(const int argc, const char* argv[]) {
     }
 #else
     s = getArg("-bench", false, false);
-    if (o.oindex == "" && o.orlcp == "" && s == "") {
+    if (o.oindex == "" && o.orlcp == "" && o.othresholds == "" && o.ominima == "" && s == "") {
         std::cout << "No output formats passed. If you want to construct the index but not output anything (for benchmarking purposes, typically), then '-bench' must be explictly passed.\n";
         exit(1);
     }
@@ -168,6 +187,7 @@ void processOptions(const int argc, const char* argv[]) {
     testInFile(o.tempFile);
     testOutFile(o.oindex);
     testOutFile(o.orlcp);
+    testOutFile(o.ominima);
 
     if (!o.checkpointDir.empty()) {
         // Create the checkpoint directory if needed (idempotent); ignore EEXIST.
@@ -222,6 +242,46 @@ static rld_t* buildRldFromRlbwt(const std::string& base) {
     }
     rld_enc_finish(e, &ei);
     return e;
+}
+
+// Checks whether TeraLCP's internal run numbering for -f rlbwt input equals the
+// run numbering of the heads/len files. Internally, buildRldFromRlbwt's rld_enc
+// merges adjacent runs with equal heads, and ConstructPsi then splits every run
+// of the smallest byte (code 0, the sentinel) into runs of length 1. The two
+// numberings agree exactly when no two adjacent non-sentinel runs share a head,
+// every sentinel run has length 1 and no run is empty. Sets runs to the number
+// of heads; on disagreement returns false and describes the first problem.
+static bool rlbwtNumberingMatches(const std::string& base, uint64_t& runs, std::string& why) {
+    const std::string headsPath = base + ".bwt.heads", lenPath = base + ".bwt.len";
+    std::ifstream hf(headsPath, std::ios::binary), lf(lenPath, std::ios::binary);
+    if (!hf.is_open() || !lf.is_open()) { why = "cannot open " + headsPath + " or " + lenPath; return false; }
+    std::vector<unsigned char> heads((std::istreambuf_iterator<char>(hf)), std::istreambuf_iterator<char>());
+    runs = heads.size();
+    if (runs == 0) { why = "empty heads file"; return false; }
+    const unsigned char sentinel = *std::min_element(heads.begin(), heads.end());
+    std::vector<char> lbuf(5 << 20);
+    uint64_t i = 0;
+    while (i < runs) {
+        const uint64_t take = std::min<uint64_t>(runs - i, 1 << 20);
+        lf.read(lbuf.data(), static_cast<std::streamsize>(take * 5));
+        if (!lf) { why = lenPath + " has fewer than " + std::to_string(runs) + " run lengths"; return false; }
+        for (uint64_t k = 0; k < take; ++k, ++i) {
+            uint64_t L = 0;
+            std::memcpy(&L, lbuf.data() + 5 * k, 5);
+            if (L == 0) { why = "run " + std::to_string(i) + " has length 0"; return false; }
+            if (heads[i] == sentinel && L != 1) {
+                why = "sentinel run " + std::to_string(i) + " has length " + std::to_string(L)
+                    + " (TeraLCP splits it into " + std::to_string(L) + " runs of length 1)";
+                return false;
+            }
+            if (i > 0 && heads[i] != sentinel && heads[i] == heads[i - 1]) {
+                why = "runs " + std::to_string(i - 1) + " and " + std::to_string(i)
+                    + " have the same head (rld_enc merges them into one run)";
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 int main(const int argc, const char*argv[]) {
@@ -283,6 +343,42 @@ int main(const int argc, const char*argv[]) {
     if (o.v >= TIME) { Timer.stop(); } //Program Initialization 
     #endif
 
+    // Run numbering bookkeeping for -ominima: the number of runs in the input
+    // RLBWT (0 when unknown) and whether TeraLCP numbers runs differently.
+    uint64_t minimaInputRuns = 0;
+    bool minimaNumberingDiffers = false;
+    if (o.ominima != "") {
+        if (o.inputFormat == options::rlbwt || (o.inputFormat == options::lcp_index && !o.rlbwtMeta.empty())) {
+            const std::string base = (o.inputFormat == options::rlbwt) ? o.inputFile : o.rlbwtMeta;
+            std::string why;
+            if (!rlbwtNumberingMatches(base, minimaInputRuns, why)) {
+                std::cerr << "ERROR: -ominima: TeraLCP's run numbering would differ from the runs of '" << base
+                    << ".bwt.heads/.bwt.len' (" << why << "). The ms index indexes minima by input run, so the "
+                    << "output would be misaligned. Rewrite the RLBWT with maximal non-sentinel runs and "
+                    << "length-1 sentinel runs." << std::endl;
+                exit(1);
+            }
+        } else if (o.inputFormat == options::fmd) {
+            // ropebwt3 FMD: TeraLCP numbers runs as rld_dec decodes them, except
+            // that a run of l sentinels becomes l runs of length 1.
+            uint64_t raw = 0, split = 0;
+            rlditr_t itr;
+            rld_itr_init(fmi.e, &itr, 0);
+            int c = 0;
+            int64_t l;
+            while ((l = rld_dec(fmi.e, &itr, &c, 0)) > 0) {
+                ++raw;
+                split += (c == 0) ? static_cast<uint64_t>(l) : 1;
+            }
+            minimaInputRuns = raw;
+            minimaNumberingDiffers = (raw != split);
+            if (minimaNumberingDiffers)
+                std::cerr << "WARNING: -ominima: the FMD has " << raw << " runs, but TeraLCP splits sentinel runs "
+                    << "into length-1 runs and numbers " << split << " runs; the output follows TeraLCP's numbering "
+                    << "(header flag bit 2 is set)." << std::endl;
+        }
+    }
+
     TeraLCP ourIndex;
     if (o.inputFormat == options::fmd || o.inputFormat == options::rlbwt) {
         #ifndef BENCHFASTONLY
@@ -307,7 +403,18 @@ int main(const int argc, const char*argv[]) {
     }
     else if (o.inputFormat == options::lcp_index) {
         ourIndex = TeraLCP(o.inputFile, o.v);
+        if (o.ominima != "" && minimaInputRuns != 0 && minimaInputRuns != ourIndex.numRuns()) {
+            std::cerr << "ERROR: -ominima: the lcp_index has " << ourIndex.numRuns() << " runs but '" << o.rlbwtMeta
+                << ".bwt.heads' has " << minimaInputRuns << "; they describe different BWTs." << std::endl;
+            exit(1);
+        }
     }
+
+    // -ominima writer, fed by whichever per-run pass runs first below.
+    std::unique_ptr<MsMinimaWriter> minima;
+    if (o.ominima != "")
+        minima.reset(new MsMinimaWriter(o.ominima, minimaInputRuns, minimaNumberingDiffers, o.minimaBucketBytes));
+    bool minimaDone = false;
 
     // pfp-thresholds-style thresholds (BASE.thr, BASE.thr_pos) plus the run-length BWT
     // companion files (BASE.bwt.heads, BASE.bwt.len). Run metadata is read from
@@ -357,8 +464,12 @@ int main(const int argc, const char*argv[]) {
         try {
             if (needIndexLater)
                 ourIndex.writeThresholds(o.othresholds, o.threshbound, runInfo, o.thrLegacy, o.thrWidth);
-            else
-                ourIndex.writeThresholdsParallel(o.othresholds, o.threshbound, runInfo, o.v, o.thrLegacy, o.thrWidth);
+            else {
+                // The destructive parallel pass also produces -ominima when requested.
+                ourIndex.writeThresholdsParallel(o.othresholds, o.threshbound, runInfo, o.v, o.thrLegacy, o.thrWidth,
+                                                 minima.get());
+                minimaDone = true;
+            }
             // Emit the run-length BWT companion files too, except when the run
             // metadata came from rlbwt heads/len (-f rlbwt or --rlbwt-meta): those
             // files already exist, and writeBwtHeadsLen's DNA code->ASCII map would
@@ -375,22 +486,37 @@ int main(const int argc, const char*argv[]) {
     }
 
 
-    if (o.orlcp != "") {
+    // -orlcp and -ominima share one per-run pass. It frees the index as it goes
+    // unless -oindex still has to serialize it below.
+    const bool minimaPending = minima && !minimaDone;
+    if (o.orlcp != "" || minimaPending) {
         #ifndef BENCHFASTONLY
         if (o.v >= TIME) { Timer.start("min LCP per run computation"); }
         #endif
-        std::ofstream lcpOut(o.orlcp);
-        if (!lcpOut.is_open()) {
-            std::cerr << "ERROR: File '" << o.orlcp << "' failed to open for writing!\n";
+        std::ofstream lcpOut;
+        if (o.orlcp != "") {
+            lcpOut.open(o.orlcp);
+            if (!lcpOut.is_open()) {
+                std::cerr << "ERROR: File '" << o.orlcp << "' failed to open for writing!\n";
+                exit(1);
+            }
+        }
+        std::pair<sdsl::int_vector<>, sdsl::int_vector<>> l;
+        try {
+            l = ourIndex.ComputeMinLCPRunParallelDestructive(o.v, nullptr, nullptr,
+                    minimaPending ? minima.get() : nullptr, o.oindex == "", o.orlcp != "");
+        } catch (const std::exception& e) {
+            std::cerr << "ERROR: " << e.what() << std::endl;
             exit(1);
         }
-        auto l = ourIndex.ComputeMinLCPRunParallelDestructive(o.v);
-        assert(l.first.size() == l.second.size());
-        uint64_t runs = l.first.size();
-        if (o.v >= TIME) { Timer.start("sequential output min LCP per run"); }
-        for (uint64_t i = 0; i < runs; ++i) 
-            lcpOut << "( " << l.first[i] << ", " << l.second[i] << ")\n";
-        if (o.v >= TIME) { Timer.stop(); } //sequential output min LCP per run
+        if (o.orlcp != "") {
+            assert(l.first.size() == l.second.size());
+            uint64_t runs = l.first.size();
+            if (o.v >= TIME) { Timer.start("sequential output min LCP per run"); }
+            for (uint64_t i = 0; i < runs; ++i) 
+                lcpOut << "( " << l.first[i] << ", " << l.second[i] << ")\n";
+            if (o.v >= TIME) { Timer.stop(); } //sequential output min LCP per run
+        }
         #ifndef BENCHFASTONLY
         if (o.v >= TIME) { Timer.stop(); } //min LCP per run computation
         #endif
