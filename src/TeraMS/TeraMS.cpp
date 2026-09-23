@@ -245,7 +245,7 @@ int main(const int argc, const char*argv[]) {
     WriteQueue write_queue;
     std::thread write_thread(write_thread_func, std::ref(write_queue), out_len, out_pos, std::ref(total_write_time));
     
-    auto ms_step = [&](const SeqInfo& seq_info) {
+    auto ms_step_body = [&](const SeqInfo& seq_info) {
         #pragma omp atomic
         total_seq_len += seq_info.seq_len;
         thread_local static std::pair<std::vector<uint32_t>, std::vector<uint64_t>> ms_result;
@@ -311,6 +311,30 @@ int main(const int argc, const char*argv[]) {
             out_oracle.close();
         }
         #endif
+    };
+
+    // An exception that escapes the OpenMP region in process_sequences
+    // terminates the program without saying which record caused it, so each
+    // record is processed inside a handler that reports the record and exits.
+    // Pattern characters absent from the text do not throw, so anything caught
+    // here is an internal error or an oracle file that does not match.
+    auto ms_step = [&](const SeqInfo& seq_info) {
+        std::string error;
+        try {
+            ms_step_body(seq_info);
+        } catch (const std::exception& e) {
+            error = e.what();
+        } catch (...) {
+            error = "unknown exception";
+        }
+        if (!error.empty()) {
+            // Only one thread reports and exits.
+            #pragma omp critical(ms_step_error)
+            {
+                std::cerr << "ERROR: Failed to process record '" << seq_info.seq_name << "': " << error << std::endl;
+                exit(1);
+            }
+        }
     };
 
     if (o.v >= TIME) { Timer.start("Processing patterns"); }
