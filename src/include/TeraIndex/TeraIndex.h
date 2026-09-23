@@ -1,5 +1,7 @@
 #ifndef R_SA_LCP_TeraIndex_H
 #define R_SA_LCP_TeraIndex_H
+#include<array>
+#include<limits>
 #include<optional>
 #include<sdsl/int_vector.hpp>
 #include"moveStructure/moveStructure.h"
@@ -22,6 +24,24 @@ class TeraIndex {
     sdsl::int_vector<> intAtTop, intAtBot;
     MoveStructureStartTable Phi, InvPhi;
     sdsl::int_vector<> PLCPsamples, PLCPBelowsamples;
+
+    // char_in_text[c] is true when character code c occurs in the BWT (and so in
+    // the text). It is filled in by load() and consulted by the matching
+    // statistics loops for every pattern character.
+    std::array<bool, 256> char_in_text{};
+
+    void compute_char_in_text() {
+        char_in_text.fill(false);
+        for (uint64_t i = 0; i < rlbwt.size(); ++i) {
+            uint64_t c = rlbwt[i];
+            if (c < char_in_text.size())
+                char_in_text[c] = true;
+        }
+        // Code 0 is the sequence separator, which a pattern character can never
+        // match, and the invalid code must never count as present.
+        char_in_text[0] = false;
+        char_in_text[invalid_char_code] = false;
+    }
 
     using LF_IntervalPoint = MoveStructureTable::IntervalPoint;
     using Psi_IntervalPoint = MoveStructureTable::IntervalPoint;
@@ -115,6 +135,15 @@ class TeraIndex {
 
     public:
     typedef uint64_t size_type;
+
+    // Position reported for a pattern position whose matching statistic is 0,
+    // i.e. whose character does not occur in the text.
+    static constexpr uint64_t no_ms_pos = std::numeric_limits<uint64_t>::max();
+
+    // Code returned by charToBits for characters outside ACGTN (either case).
+    // It is not a valid BWT code, so it is never present in the text and never
+    // equal to an F value in the psi LCE comparisons.
+    static constexpr uint8_t invalid_char_code = 255;
 
     void constructFromLCPIndexFileWriteAndClear(std::ifstream& lcpIn, std::ofstream& MSIout, verbosity v = TIME,
             bool vLF = false,
@@ -287,6 +316,7 @@ class TeraIndex {
         sdsl::load(InvPhi, in);
         sdsl::load(PLCPsamples, in);
         sdsl::load(PLCPBelowsamples, in);
+        compute_char_in_text();
     }
 
     #ifdef STATS
@@ -812,13 +842,23 @@ class TeraIndex {
         size_t curr_oracle_index = 0;
         
         // Initial state is the end of the BWT, end of pattern, length of 0
-        MSState state(pattern, m, end_bwt_pos(), rlbwt_tail_to_phi(end_bwt_pos()));
+        const LF_IntervalPoint initial_rlbwt_pos = end_bwt_pos();
+        const Phi_IntervalPoint initial_phi_pos = rlbwt_tail_to_phi(initial_rlbwt_pos);
+        MSState state(pattern, m, initial_rlbwt_pos, initial_phi_pos);
 
         std::vector<uint32_t> ms_len(m);
         std::vector<uint64_t> ms_pos(m);
 
         for (state.i = 0; state.i < m; ++state.i) {
             uint8_t c = charToBits(state.pattern[m - state.i - 1]);
+            // Handled exactly as in ms_loop, without consuming oracle entries, so
+            // that the oracle written by ms_loop stays aligned.
+            if (!char_in_text[c]) {
+                restart_match(state, initial_rlbwt_pos, initial_phi_pos);
+                ms_len[state.m - state.i - 1] = 0;
+                ms_pos[state.m - state.i - 1] = no_ms_pos;
+                continue;
+            }
             if (c != rlbwt[state.rlbwt_pos.interval]) {
                 reposition_oracle(state, repositioning_oracle, curr_oracle_index);
             }
@@ -846,15 +886,16 @@ private:
     #endif
 
     // ================================ General helper functions ================================
-    // Make static contexpr, but this is probably fine
+    // Maps a pattern character to its BWT code. Lowercase acgtn are folded to
+    // uppercase, and any other character maps to invalid_char_code.
     static uint8_t charToBits(const char c) {
         switch (c) {
-            case  'A': return 1;
-            case  'C': return 2;
-            case  'G': return 3;
-            case  'T': return 4;
-            case  'N': return 5;
-            default: throw std::invalid_argument("Invalid character: " + std::string(1, c));
+            case 'A': case 'a': return 1;
+            case 'C': case 'c': return 2;
+            case 'G': case 'g': return 3;
+            case 'T': case 't': return 4;
+            case 'N': case 'n': return 5;
+            default: return invalid_char_code;
         };
     }
 
@@ -994,6 +1035,17 @@ private:
         : pattern(pattern), m(m), i(0), rlbwt_pos(rlbwt_pos), phi_pos(phi_pos), length(0) {}
     };
 
+    // Called for a pattern character that does not occur in the text. No match
+    // can extend across such a character, so the scan state is returned to the
+    // state used at the start of a pattern, and the matching statistic at the
+    // next position to the left is computed from scratch. This does not
+    // reposition, so it neither writes nor consumes oracle entries.
+    static void restart_match(MSState& state, const LF_IntervalPoint& initial_rlbwt_pos, const Phi_IntervalPoint& initial_phi_pos) {
+        state.rlbwt_pos = initial_rlbwt_pos;
+        state.phi_pos = initial_phi_pos;
+        state.length = 0;
+    }
+
     // Used to define different MS algorithms by passing a different reposition function
     using RepositionFunction = std::function<void(MSState& state, const uint8_t c)>;
     std::pair<std::vector<uint32_t>, std::vector<uint64_t>> ms_loop(const char* pattern, const uint64_t m, RepositionFunction reposition) {
@@ -1003,13 +1055,23 @@ private:
         }
         #endif
         // Initial state is the end of the BWT, end of pattern, length of 0
-        MSState state(pattern, m, end_bwt_pos(), rlbwt_tail_to_phi(end_bwt_pos()));
+        const LF_IntervalPoint initial_rlbwt_pos = end_bwt_pos();
+        const Phi_IntervalPoint initial_phi_pos = rlbwt_tail_to_phi(initial_rlbwt_pos);
+        MSState state(pattern, m, initial_rlbwt_pos, initial_phi_pos);
 
         std::vector<uint32_t> ms_len(m);
         std::vector<uint64_t> ms_pos(m);
 
         for (state.i = 0; state.i < m; ++state.i) {
             uint8_t c = charToBits(state.pattern[m - state.i - 1]);
+            // A character absent from the text (including one outside ACGTN) has
+            // matching statistic 0 and no position.
+            if (!char_in_text[c]) {
+                restart_match(state, initial_rlbwt_pos, initial_phi_pos);
+                ms_len[state.m - state.i - 1] = 0;
+                ms_pos[state.m - state.i - 1] = no_ms_pos;
+                continue;
+            }
             if (c != rlbwt[state.rlbwt_pos.interval]) {
                 #ifdef STATS
                 ++mismatches;
@@ -1031,8 +1093,10 @@ private:
     void reposition_explicit(MSState& state, const uint8_t c, LCEFunction lce) {
         auto pred_pos_result = pred_char(state.rlbwt_pos, c);
         auto succ_pos_result = succ_char(state.rlbwt_pos, c);
+        // ms_loop only repositions on characters that occur in the BWT, so at
+        // least one of pred and succ exists.
         if (!pred_pos_result.has_value() && !succ_pos_result.has_value())
-            throw std::runtime_error("No valid positions found for repositioning, character not found in BWT: " + std::string(1, c));
+            throw std::runtime_error("No valid positions found for repositioning, character code not found in BWT: " + std::to_string(c));
 
         LF_IntervalPoint pred_pos;
         Phi_IntervalPoint pred_phi_pos;
