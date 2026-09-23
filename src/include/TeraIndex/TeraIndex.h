@@ -1241,12 +1241,9 @@ private:
     * @brief LCE between start and end position, where end is a run head or tail, by using both Phi and Psi, with early stopping conditions
     * 
     * @tparam consecutive_steps Number of consecutive steps to take before switching to the other extension method, best if multiple of 2 since Psi uses 2 mapping steps per iteration
-    * @param phi_position Current Phi position
-    * @param start Start position (current MS position)
-    * @param end End position (predecessor or successor position)
-    * @param distance Distance to the end position (distance to the predecessor or successor)
+    * @param state Current MS state; psi extension stops once the LCE reaches state.length
+    * @param end End position (predecessor or successor position) and its BWT distance from the current position
     * @param lower_lim If the minimum LCE goes beneath this value, stop and return 0
-    * @param upper_lim If the LCE reaches this value, stop and return the value
     * @return uint64_t The LCE between the start and end position
     */
     template<size_t consecutive_steps = 10>
