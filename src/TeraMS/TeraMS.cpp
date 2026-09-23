@@ -28,6 +28,8 @@ void printUsage() {
         "    -oracle                                optional       also write each record's repositioning decisions to QUERY.RECORD.oracle for\n"
         "                                                          later use by -m oracle. Only available in builds compiled with -DWRITE_ORACLE,\n"
         "                                                          and requires -p 1 and a mode other than oracle.\n"
+        "    -full-load                             optional       load every component of the index. By default only the components that the\n"
+        "                                                          chosen mode reads are loaded, which uses less memory and gives the same output.\n"
         "    -p          INT                        optional       Limit the program to (positive) INT threads. By default uses maximum available. Maximum on this hardware is " << omp_get_max_threads() << "\n"
         "    -v          [quiet,time,verb]          optional       Verbosity, verb for most verbose output, time for timer info, and quiet for no output. time is default.\n"
         "    -h, --help                             optional       Print this help message.\n"
@@ -47,6 +49,7 @@ struct options{
     std::string indexFile, patternFile, outputFile = "", mode = "dual";
     unsigned numThreads = omp_get_max_threads();
     bool oracle = false;
+    bool fullLoad = false;
     verbosity v = TIME;
 }o;
 
@@ -76,6 +79,7 @@ void processOptions(const int argc, const char* argv[]) {
         o.mode = s;
     }
     o.oracle = getArgument(argc, argv, used, "-oracle", false, false) != ""; // Default is false
+    o.fullLoad = getArgument(argc, argv, used, "-full-load", false, false) != ""; // Default is false
     s = getArgument(argc, argv, used, "-p", false, true);
     if (s != "") {
         // std::stoul accepts a leading sign and trailing garbage, so require the
@@ -164,6 +168,16 @@ void write_thread_func(WriteQueue& write_queue, FILE* out_len, FILE* out_pos, do
     }
 }
 
+// Index components read by the matching statistics algorithm for mode.
+uint32_t ms_components(const std::string& mode) {
+    if (mode == "psi") { return TeraIndex::ms_psi_components; }
+    if (mode == "phi") { return TeraIndex::ms_phi_components; }
+    if (mode == "dual") { return TeraIndex::ms_dual_components; }
+    if (mode == "phiskip") { return TeraIndex::ms_phiskip_components; }
+    if (mode == "oracle") { return TeraIndex::ms_oracle_components; }
+    return TeraIndex::all_components;
+}
+
 int main(const int argc, const char*argv[]) {
 	processOptions(argc, argv);
 
@@ -195,7 +209,7 @@ int main(const int argc, const char*argv[]) {
 	if (o.v >= TIME) { Timer.start("Loading index " + o.indexFile); }
 	std::ifstream in(o.indexFile, std::ios::binary);
 	TeraIndex msIndex;
-	msIndex.load(in);
+	msIndex.load(in, o.fullLoad ? TeraIndex::all_components : ms_components(o.mode));
 	if (!in) {
 		std::cerr << "ERROR: Failed to read index file '" << o.indexFile << "'; it may be truncated or not a TeraMS index." << std::endl;
 		exit(1);
