@@ -30,6 +30,11 @@ class TeraIndex {
     // statistics loops for every pattern character.
     std::array<bool, 256> char_in_text{};
 
+    // Bit mask of the components (component_* constants below) that hold the
+    // index's data. It covers every component unless load() was asked to skip
+    // some, and the public algorithms check it before touching any component.
+    uint32_t loaded_components = all_components;
+
     void compute_char_in_text() {
         char_in_text.fill(false);
         for (uint64_t i = 0; i < rlbwt.size(); ++i) {
@@ -144,6 +149,40 @@ class TeraIndex {
     // It is not a valid BWT code, so it is never present in the text and never
     // equal to an F value in the psi LCE comparisons.
     static constexpr uint8_t invalid_char_code = 255;
+
+    // Components of a .ms_index, as bits of the mask passed to load(). They are
+    // listed in the order serialize() writes them, after totalLen, which is
+    // always loaded.
+    static constexpr uint32_t component_F                = 1u << 0;
+    static constexpr uint32_t component_rlbwt            = 1u << 1;
+    static constexpr uint32_t component_Psi              = 1u << 2;
+    static constexpr uint32_t component_LF               = 1u << 3;
+    static constexpr uint32_t component_PsiIntAtTop      = 1u << 4;
+    static constexpr uint32_t component_PsiOffAtTop      = 1u << 5;
+    static constexpr uint32_t component_intAtTop         = 1u << 6;
+    static constexpr uint32_t component_intAtBot         = 1u << 7;
+    static constexpr uint32_t component_Phi              = 1u << 8;
+    static constexpr uint32_t component_InvPhi           = 1u << 9;
+    static constexpr uint32_t component_PLCPsamples      = 1u << 10;
+    static constexpr uint32_t component_PLCPBelowsamples = 1u << 11;
+    static constexpr uint32_t all_components             = (1u << 12) - 1;
+
+    // Components read by each matching statistics algorithm. Every mode walks
+    // the BWT runs with LF and rlbwt, and tracks the text position of the
+    // current row with Phi and intAtTop, which is how ms_pos is reported. The
+    // Psi LCE compares pattern characters against F while stepping with Psi,
+    // entering Psi through PsiIntAtTop and PsiOffAtTop. The Phi LCE reads
+    // PLCPsamples. The oracle mode replays stored repositioning decisions and
+    // computes no LCE. No mode reads intAtBot, InvPhi or PLCPBelowsamples,
+    // which only the repeat finders and printRaw use.
+    static constexpr uint32_t ms_common_components = component_rlbwt | component_LF | component_intAtTop | component_Phi;
+    static constexpr uint32_t ms_psi_components = ms_common_components | component_F | component_Psi | component_PsiIntAtTop | component_PsiOffAtTop;
+    static constexpr uint32_t ms_phi_components = ms_common_components | component_PLCPsamples;
+    static constexpr uint32_t ms_dual_components = ms_psi_components | ms_phi_components;
+    static constexpr uint32_t ms_phiskip_components = ms_dual_components;
+    static constexpr uint32_t ms_oracle_components = ms_common_components;
+
+    uint32_t get_loaded_components() const { return loaded_components; }
 
     void constructFromLCPIndexFileWriteAndClear(std::ifstream& lcpIn, std::ofstream& MSIout, verbosity v = TIME,
             bool vLF = false,
@@ -281,6 +320,9 @@ class TeraIndex {
     }
 
     size_type serialize(std::ostream &out, sdsl::structure_tree_node *v=NULL, std::string name="") {
+        // A partially loaded index would be written as a file that looks valid
+        // but has empty components.
+        require_components(all_components, "serialize");
         sdsl::structure_tree_node* child = sdsl::structure_tree::add_child(v, name, sdsl::util::class_name(*this));
         size_type bytes = 0;
 
@@ -302,21 +344,57 @@ class TeraIndex {
         return bytes;
     }
 
-    void load(std::istream& in) {
+    // Loads the components named in the components mask (all of them by
+    // default) and leaves the others empty. The stream position moves past a
+    // skipped component without reading its payload when the stream supports
+    // seeking, so a skipped component costs neither memory nor I/O. The public
+    // algorithms throw std::logic_error if a component they need was skipped.
+    // As with a full load, the caller should check the stream state afterwards.
+    void load(std::istream& in, const uint32_t components = all_components) {
+        const bool seekable = in.tellg() != std::istream::pos_type(-1);
         sdsl::load(totalLen, in);
-        sdsl::load(F, in);
-        sdsl::load(rlbwt, in);
-        sdsl::load(Psi, in);
-        sdsl::load(LF, in);
-        sdsl::load(PsiIntAtTop, in);
-        sdsl::load(PsiOffAtTop, in);
-        sdsl::load(intAtTop, in);
-        sdsl::load(intAtBot, in);
-        sdsl::load(Phi, in);
-        sdsl::load(InvPhi, in);
-        sdsl::load(PLCPsamples, in);
-        sdsl::load(PLCPBelowsamples, in);
-        compute_char_in_text();
+        load_or_skip_int_vector(F, component_F, components, in, seekable);
+        load_or_skip_int_vector(rlbwt, component_rlbwt, components, in, seekable);
+        load_or_skip_move_table(Psi, component_Psi, components, in, seekable);
+        load_or_skip_move_table(LF, component_LF, components, in, seekable);
+        load_or_skip_int_vector(PsiIntAtTop, component_PsiIntAtTop, components, in, seekable);
+        load_or_skip_int_vector(PsiOffAtTop, component_PsiOffAtTop, components, in, seekable);
+        load_or_skip_int_vector(intAtTop, component_intAtTop, components, in, seekable);
+        load_or_skip_int_vector(intAtBot, component_intAtBot, components, in, seekable);
+        load_or_skip_move_table(Phi, component_Phi, components, in, seekable);
+        load_or_skip_move_table(InvPhi, component_InvPhi, components, in, seekable);
+        load_or_skip_int_vector(PLCPsamples, component_PLCPsamples, components, in, seekable);
+        load_or_skip_int_vector(PLCPBelowsamples, component_PLCPBelowsamples, components, in, seekable);
+        loaded_components = components & all_components;
+        if (loaded_components & component_rlbwt) {
+            compute_char_in_text();
+        } else {
+            char_in_text.fill(false);
+        }
+        // Seeking past the end of a file does not fail, so a truncated file
+        // whose missing bytes all lie in skipped components is caught here.
+        if (seekable && in) {
+            const auto pos = in.tellg();
+            in.seekg(0, std::ios::end);
+            if (in.tellg() < pos) {
+                in.setstate(std::ios::failbit);
+            } else {
+                in.seekg(pos);
+            }
+        }
+    }
+
+    // Throws std::logic_error naming the components in needed that load() skipped.
+    void require_components(const uint32_t needed, const char* caller) const {
+        const uint32_t missing = needed & ~loaded_components;
+        if (missing == 0) { return; }
+        static const char* const names[] = {"F", "rlbwt", "Psi", "LF", "PsiIntAtTop", "PsiOffAtTop", "intAtTop",
+            "intAtBot", "Phi", "InvPhi", "PLCPsamples", "PLCPBelowsamples"};
+        std::string msg = std::string(caller) + " needs index components that were not loaded:";
+        for (size_t b = 0; b < sizeof(names) / sizeof(names[0]); ++b) {
+            if (missing & (1u << b)) { msg += std::string(" ") + names[b]; }
+        }
+        throw std::logic_error(msg);
     }
 
     #ifdef STATS
@@ -376,6 +454,7 @@ class TeraIndex {
     }
     
     void printRaw() const {
+        require_components(all_components, "printRaw");
         std::cout << "LCP_Phi\tLCP_InvPhi\n";
         std::vector<uint64_t> lcpPhi(totalLen), lcpInvPhi(totalLen);
         MoveStructureStartTable::IntervalPoint phiPoint{static_cast<uint64_t>(-1), intAtTop[0], 0}, 
@@ -394,6 +473,7 @@ class TeraIndex {
     //matching algorithms-----------------------
 
     sdsl::int_vector<> getSeqStarts() const {
+        require_components(all_components, "getSeqStarts");
         const uint64_t numRuns = LF.num_intervals();
         uint64_t numSequences = 0;
         while (numSequences < numRuns && F[numSequences] == 0) 
@@ -418,6 +498,7 @@ class TeraIndex {
     //NOTE: THIS ALGORITHM MIGHT BE FASTER IN PRACTICE IF WE COMPUTE IT IN THE TEXT ORDER,
     //  I.E. BY PLCP instead of BWT order (faster due to locality of reference)
     void superMaximalRepeats(std::ostream& out, const sdsl::int_vector<>& seqStarts, const uint64_t lengthThreshold = 1) const {
+        require_components(all_components, "superMaximalRepeats");
         assert(lengthThreshold > 0);
         //a supermaximal repeat is a substring of the text T[i,i+l) s.t.
         //  a. occ(T[i,i+l)) > 1
@@ -650,6 +731,7 @@ class TeraIndex {
     //no default value for lengthThreshold because there will be many of length >= 1
     //occ[c]^2 per character c?
     void repeats(std::ostream& out, const sdsl::int_vector<>& seqStarts, const uint64_t lengthThreshold) const {
+        require_components(all_components, "repeats");
         assert(lengthThreshold > 0);
         //a repeat is a match T[i,i+l) = T[j, j+l) s.t.
         //  a. T[i-1] != T[j-1]
@@ -840,6 +922,7 @@ class TeraIndex {
     }
 
     std::pair<std::vector<uint32_t>, std::vector<uint64_t>> ms_phi(const char* pattern, const uint64_t m) {
+        require_components(ms_phi_components, "ms_phi");
         return ms_loop(pattern, m, [this](MSState& state, const uint8_t c) {
             reposition_explicit(state, c, [this](const MSState& state, const PosDist& end, const uint64_t lower_lim) {
                 return phi_lce(state, end, lower_lim);
@@ -848,6 +931,7 @@ class TeraIndex {
     }
     
     std::pair<std::vector<uint32_t>, std::vector<uint64_t>> ms_psi(const char* pattern, const uint64_t m) {
+        require_components(ms_psi_components, "ms_psi");
         return ms_loop(pattern, m, [this](MSState& state, const uint8_t c) {
             reposition_explicit(state, c, [this](const MSState& state, const PosDist& end, const uint64_t lower_lim) {
                 return psi_lce(state, end, lower_lim);
@@ -856,6 +940,7 @@ class TeraIndex {
     }
 
     std::pair<std::vector<uint32_t>, std::vector<uint64_t>> ms_dual(const char* pattern, const uint64_t m) {
+        require_components(ms_dual_components, "ms_dual");
         return ms_loop(pattern, m, [this](MSState& state, const uint8_t c) {
             reposition_explicit(state, c, [this](const MSState& state, const PosDist& end, const uint64_t lower_lim) {
                 return dual_lce(state, end, lower_lim);
@@ -864,6 +949,7 @@ class TeraIndex {
     }
 
     std::pair<std::vector<uint32_t>, std::vector<uint64_t>> ms_phiskip(const char* pattern, const uint64_t m) {
+        require_components(ms_phiskip_components, "ms_phiskip");
         return ms_loop(pattern, m, [this](MSState& state, const uint8_t c) {
             reposition_explicit(state, c, [this](const MSState& state, const PosDist& end, const uint64_t lower_lim) {
                 return phiskip_lce(state, end, lower_lim);
@@ -872,6 +958,7 @@ class TeraIndex {
     }
 
     std::pair<std::vector<uint32_t>, std::vector<uint64_t>> ms_oracle(const char* pattern, const uint64_t m, std::vector<uint32_t>& repositioning_oracle) {
+        require_components(ms_oracle_components, "ms_oracle");
         size_t curr_oracle_index = 0;
         
         // Initial state is the end of the BWT, end of pattern, length of 0
@@ -907,6 +994,65 @@ class TeraIndex {
     }
 
 private:
+    // ================================ Selective loading ================================
+    // Moves the stream position forward by bytes, by seeking when possible and
+    // otherwise by reading and discarding.
+    static void skip_bytes(std::istream& in, const uint64_t bytes, const bool seekable) {
+        if (seekable) {
+            in.seekg(static_cast<std::streamoff>(bytes), std::ios::cur);
+        } else {
+            in.ignore(static_cast<std::streamsize>(bytes));
+        }
+    }
+
+    // Skips a serialized sdsl::int_vector<1> (bit_vector): a 64-bit length in
+    // bits followed by that many bits rounded up to whole 64-bit words, as
+    // written by int_vector::serialize.
+    static void skip_bit_vector(std::istream& in, const bool seekable) {
+        uint64_t bits = 0;
+        sdsl::read_member(bits, in);
+        skip_bytes(in, ((bits + 63) / 64) * sizeof(uint64_t), seekable);
+    }
+
+    // Skips a serialized sdsl::int_vector<> (dynamic width): the same layout as
+    // a bit_vector with a one byte element width after the length.
+    static void skip_int_vector(std::istream& in, const bool seekable) {
+        uint64_t bits = 0;
+        uint8_t width = 0;
+        sdsl::read_member(bits, in);
+        sdsl::read_member(width, in);
+        skip_bytes(in, ((bits + 63) / 64) * sizeof(uint64_t), seekable);
+    }
+
+    // Skips a serialized MoveStructureTable or MoveStructureStartTable. Both
+    // serialize only a packedTripleVector, which is four one byte widths
+    // followed by a bit_vector.
+    static void skip_move_table(std::istream& in, const bool seekable) {
+        skip_bytes(in, 4 * sizeof(uint8_t), seekable);
+        skip_bit_vector(in, seekable);
+    }
+
+    static void load_or_skip_int_vector(sdsl::int_vector<>& v, const uint32_t component, const uint32_t components,
+            std::istream& in, const bool seekable) {
+        if (components & component) {
+            sdsl::load(v, in);
+        } else {
+            v = sdsl::int_vector<>();
+            skip_int_vector(in, seekable);
+        }
+    }
+
+    template<class Table>
+    static void load_or_skip_move_table(Table& t, const uint32_t component, const uint32_t components,
+            std::istream& in, const bool seekable) {
+        if (components & component) {
+            sdsl::load(t, in);
+        } else {
+            t = Table();
+            skip_move_table(in, seekable);
+        }
+    }
+
     // ================================ Oracle ================================
     #ifdef WRITE_ORACLE
     bool write_oracle = false;
