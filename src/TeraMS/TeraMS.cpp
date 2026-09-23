@@ -2,6 +2,7 @@
 #include "util/fasta.h"
 #include "util/util.h"
 #include <cctype>
+#include <cerrno>
 #include <limits>
 #include <queue>
 
@@ -178,9 +179,13 @@ int main(const int argc, const char*argv[]) {
     if (o.v >= TIME) { Timer.start("msComputer"); }
     if (o.v >= TIME) { Timer.start("Program Initialization"); }
 	if (o.v >= TIME) { Timer.start("Loading index " + o.indexFile); }
-	std::ifstream in(o.indexFile);
+	std::ifstream in(o.indexFile, std::ios::binary);
 	TeraIndex msIndex;
 	msIndex.load(in);
+	if (!in) {
+		std::cerr << "ERROR: Failed to read index file '" << o.indexFile << "'; it may be truncated or not a TeraMS index." << std::endl;
+		exit(1);
+	}
     #ifdef WRITE_ORACLE
     msIndex.set_oracle(o.oracle);
     #endif
@@ -195,7 +200,22 @@ int main(const int argc, const char*argv[]) {
     std::string outputFile_len = o.outputFile + ".len";
     std::string outputFile_pos = o.outputFile + ".pos";
     FILE* out_len = fopen(outputFile_len.c_str(), "w");
+    if (!out_len) {
+        std::cerr << "ERROR: Cannot open output file '" << outputFile_len << "' for writing: " << strerror(errno) << std::endl;
+        exit(1);
+    }
     FILE* out_pos = fopen(outputFile_pos.c_str(), "w");
+    if (!out_pos) {
+        std::cerr << "ERROR: Cannot open output file '" << outputFile_pos << "' for writing: " << strerror(errno) << std::endl;
+        exit(1);
+    }
+    // Opened before any pattern is processed so that a bad path fails early.
+    std::string outputFile_stats = o.outputFile + ".stats";
+    std::ofstream out_stats(outputFile_stats);
+    if (!out_stats.is_open()) {
+        std::cerr << "ERROR: Cannot open output file '" << outputFile_stats << "' for writing: " << strerror(errno) << std::endl;
+        exit(1);
+    }
     int fd_len = fileno(out_len);
     int fd_pos = fileno(out_pos);
 
@@ -233,8 +253,18 @@ int main(const int argc, const char*argv[]) {
         // Load repositioning oracle if needed
         std::vector<uint32_t> repositioning_oracle;
         if (o.mode == "oracle") {
-            std::ifstream in_oracle(o.patternFile + "." + seq_info.seq_name + ".oracle");
+            std::string oracleFile = o.patternFile + "." + seq_info.seq_name + ".oracle";
+            std::ifstream in_oracle(oracleFile, std::ios::binary);
+            if (!in_oracle.is_open()) {
+                std::cerr << "ERROR: Cannot open oracle file '" << oracleFile << "' for record '" << seq_info.seq_name
+                          << "': " << strerror(errno) << ". Oracle files are written by a WRITE_ORACLE build run with -oracle." << std::endl;
+                exit(1);
+            }
             repositioning_oracle = msIndex.load_oracle(in_oracle);
+            if (!in_oracle) {
+                std::cerr << "ERROR: Failed to read oracle file '" << oracleFile << "'; it may be truncated or corrupt." << std::endl;
+                exit(1);
+            }
             in_oracle.close();
         }
 
@@ -271,7 +301,12 @@ int main(const int argc, const char*argv[]) {
 
         #ifdef WRITE_ORACLE
         if (o.oracle) {
-            std::ofstream out_oracle(o.patternFile + "." + seq_info.seq_name + ".oracle");
+            std::string oracleFile = o.patternFile + "." + seq_info.seq_name + ".oracle";
+            std::ofstream out_oracle(oracleFile, std::ios::binary);
+            if (!out_oracle.is_open()) {
+                std::cerr << "ERROR: Cannot open oracle file '" << oracleFile << "' for writing: " << strerror(errno) << std::endl;
+                exit(1);
+            }
             msIndex.serialize_oracle(out_oracle);
             out_oracle.close();
         }
@@ -287,7 +322,6 @@ int main(const int argc, const char*argv[]) {
     write_thread.join();
     if (o.v >= TIME) { Timer.stop(); } //Processing patterns
     
-    std::ofstream out_stats(o.outputFile + ".stats");
     out_stats << "\tCPU query time: " << total_ms_time << " seconds" << std::endl;
     out_stats << "\t\tTime per base: " << (total_ms_time / total_seq_len) * 1e9 << " nanoseconds" << std::endl;
     out_stats << "\tCPU write time: " << total_write_time << " seconds" << std::endl << std::endl;

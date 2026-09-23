@@ -868,6 +868,8 @@ class TeraIndex {
             ms_len[state.m - state.i - 1] = state.length;
             ms_pos[state.m - state.i - 1] = state.phi_pos.position;
         }
+        if (curr_oracle_index != repositioning_oracle.size())
+            throw std::runtime_error("Repositioning oracle has unused entries, so it does not match the pattern and index");
         return std::make_pair(ms_len, ms_pos);
     }
 
@@ -1139,6 +1141,10 @@ private:
     }
 
     void reposition_oracle(MSState& state, std::vector<uint32_t>& repositioning_oracle, size_t& curr_oracle_index) {
+        // An oracle written for a different pattern or index can run out early
+        // or name a run that does not exist.
+        if (curr_oracle_index + 1 >= repositioning_oracle.size() || repositioning_oracle[curr_oracle_index] >= LF.num_intervals())
+            throw std::runtime_error("Repositioning oracle does not match the pattern and index");
         auto new_interval = repositioning_oracle[curr_oracle_index++];
         auto new_length = repositioning_oracle[curr_oracle_index++];
         if (new_interval < state.rlbwt_pos.interval) {
