@@ -40,8 +40,14 @@ struct SeqInfo {
     int64_t seq_comment_len;
 };
 
+// Reads records from seq and calls process_func on each one, with records
+// distributed over the threads of an OpenMP parallel region. Every record is
+// processed, including records with an empty sequence. kseq_read returns -1 at
+// end of file and other negative values on a malformed record or a read error;
+// the latter stop the program with an error rather than being mistaken for end
+// of file.
 template<typename ProcessFunc>
-void process_sequences(kseq_t* seq, uint16_t threads, ProcessFunc process_func) {
+void process_sequences(kseq_t* seq, unsigned threads, ProcessFunc process_func) {
     #pragma omp parallel
     {
         SeqInfo seq_info;
@@ -49,6 +55,12 @@ void process_sequences(kseq_t* seq, uint16_t threads, ProcessFunc process_func) 
             #pragma omp critical(read_seq)
             {
                 seq_info.seq_len = kseq_read(seq);
+                if (seq_info.seq_len < -1) {
+                    std::cerr << "ERROR: Failed to read the query file (kseq_read returned " << seq_info.seq_len
+                              << (seq_info.seq_len == -2 ? ", truncated or malformed quality string" : ", stream error")
+                              << ")" << std::endl;
+                    exit(1);
+                }
                 if (seq_info.seq_len >= 0) {
                     if (threads > 1) {
                         seq_info.seq_content = strdup(seq->seq.s);
@@ -63,7 +75,7 @@ void process_sequences(kseq_t* seq, uint16_t threads, ProcessFunc process_func) 
                     seq_info.seq_comment_len = seq->comment.l;
                 }
             }
-            if (seq_info.seq_len <= 0) {
+            if (seq_info.seq_len == -1) {
                 break;
             }
 
