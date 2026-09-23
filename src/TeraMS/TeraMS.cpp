@@ -1,6 +1,8 @@
 #include "TeraIndex/TeraIndex.h"
 #include "util/fasta.h"
 #include "util/util.h"
+#include <cctype>
+#include <limits>
 #include <queue>
 
 static constexpr size_t DEFAULT_BUFFER_SIZE = 64ULL * 1024ULL * 1024ULL; // 64MB
@@ -60,8 +62,24 @@ void processOptions(const int argc, const char* argv[]) {
     }
     o.oracle = getArgument(argc, argv, used, "-oracle", false, false) != ""; // Default is false
     s = getArgument(argc, argv, used, "-p", false, true);
-    if (s != "")
-        o.numThreads = std::stoul(s); 
+    if (s != "") {
+        // std::stoul accepts a leading sign and trailing garbage, so require the
+        // whole argument to be decimal digits before converting it.
+        bool valid = std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isdigit(c); });
+        unsigned long threads = 0;
+        if (valid) {
+            try {
+                threads = std::stoul(s);
+            } catch (const std::out_of_range&) {
+                valid = false;
+            }
+        }
+        if (!valid || threads == 0 || threads > std::numeric_limits<unsigned>::max()) {
+            std::cout << "Invalid value passed to -p '" << s << "'. It must be a positive integer.\n";
+            exit(1);
+        }
+        o.numThreads = threads;
+    }
     s = getArgument(argc, argv, used, "-v", false, true);
     if (s == "quiet")
         o.v = QUIET;
@@ -69,6 +87,10 @@ void processOptions(const int argc, const char* argv[]) {
         o.v = TIME;
     else if (s == "verb")
         o.v = VERB;
+    else {
+        std::cout << "Invalid value passed to -v '" << s << "'\n";
+        exit(1);
+    }
     for (int i = 0; i < argc; ++i) {
         if (!used[i]) {
             std::cout << "Argument " << i << ", '" << argv[i] << "' not recognized or used as an argument for another option. It might have been passed more than once (invalid).\n";
@@ -165,7 +187,7 @@ int main(const int argc, const char*argv[]) {
 	in.close();
 	if (o.v >= TIME) { Timer.stop(); } //Loading " + o.indexFile
 
-    Timer.start("Opening files for read (" + o.patternFile + ") and write (" + o.outputFile + ".[len|pos])");
+    if (o.v >= TIME) { Timer.start("Opening files for read (" + o.patternFile + ") and write (" + o.outputFile + ".[len|pos])"); }
     FILE *fp;
     kseq_t *seq = open_fasta(o.patternFile, &fp);
     
@@ -188,8 +210,8 @@ int main(const int argc, const char*argv[]) {
     }
     setvbuf(out_len, nullptr, _IOFBF, buffer_size_len);
     setvbuf(out_pos, nullptr, _IOFBF, buffer_size_pos);
-    Timer.stop(); //Opening files for read (" + o.patternFile + " and write (" + o.outputFile + ")
-    Timer.stop(); //Program Initialization
+    if (o.v >= TIME) { Timer.stop(); } //Opening files for read (" + o.patternFile + ") and write (" + o.outputFile + ".[len|pos])
+    if (o.v >= TIME) { Timer.stop(); } //Program Initialization
 
     #ifdef STATS
     msIndex.reset_ms_stats();
@@ -256,14 +278,14 @@ int main(const int argc, const char*argv[]) {
         #endif
     };
 
-    Timer.start("Processing patterns");
+    if (o.v >= TIME) { Timer.start("Processing patterns"); }
     process_sequences(seq, o.numThreads, ms_step);
     
     // Signal write thread to finish and wait for it
     write_queue.done = true;
     write_queue.cv.notify_one();
     write_thread.join();
-    Timer.stop(); //Processing patterns
+    if (o.v >= TIME) { Timer.stop(); } //Processing patterns
     
     std::ofstream out_stats(o.outputFile + ".stats");
     out_stats << "\tCPU query time: " << total_ms_time << " seconds" << std::endl;
@@ -279,6 +301,6 @@ int main(const int argc, const char*argv[]) {
     fclose(out_pos);
     kseq_destroy(seq);
     fclose(fp);
-    Timer.stop(); //msComputer
+    if (o.v >= TIME) { Timer.stop(); } //msComputer
     return 0;
 }
