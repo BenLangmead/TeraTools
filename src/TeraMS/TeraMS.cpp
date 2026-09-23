@@ -352,8 +352,13 @@ int main(const int argc, const char*argv[]) {
     if (o.v >= TIME) { Timer.start("Processing patterns"); }
     process_sequences(seq, o.numThreads, ms_step);
     
-    // Signal write thread to finish and wait for it
-    write_queue.done = true;
+    // Signal write thread to finish and wait for it. The flag is set while
+    // holding the queue mutex, so the write thread cannot test its wait
+    // predicate, see done still false, and then miss the notification.
+    {
+        std::lock_guard<std::mutex> lock(write_queue.mutex);
+        write_queue.done = true;
+    }
     write_queue.cv.notify_one();
     write_thread.join();
     if (o.v >= TIME) { Timer.stop(); } //Processing patterns
