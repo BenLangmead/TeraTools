@@ -21,8 +21,10 @@ void printUsage() {
         "  Output:\n"
         "    -o          FILE                       optional       base name of output files (writes FILE.len, FILE.pos and FILE.stats), otherwise QUERY is used.\n"
         "  Behavior:\n"
-        "    -m          [phi,psi,dual,oracle]      optional       matching statistics mode. dual is default. oracle replays the repositioning\n"
-        "                                                          decisions stored in QUERY.RECORD.oracle for each record (see -oracle).\n"
+        "    -m          MODE                       optional       matching statistics mode: psi, phi, dual, phiskip or oracle. dual is default.\n"
+        "                                                          phiskip uses phi unless the matched length is shorter than the BWT distance,\n"
+        "                                                          then psi. oracle replays the repositioning decisions stored in\n"
+        "                                                          QUERY.RECORD.oracle for each record (see -oracle).\n"
         "    -oracle                                optional       also write each record's repositioning decisions to QUERY.RECORD.oracle for\n"
         "                                                          later use by -m oracle. Only available in builds compiled with -DWRITE_ORACLE,\n"
         "                                                          and requires -p 1 and a mode other than oracle.\n"
@@ -66,7 +68,7 @@ void processOptions(const int argc, const char* argv[]) {
         o.outputFile = o.patternFile;
     }
     s = getArgument(argc, argv, used, "-m", false, true);
-    if (s != "" && s != "phi" && s != "psi" && s != "dual" && s != "oracle") {
+    if (s != "" && s != "phi" && s != "psi" && s != "dual" && s != "phiskip" && s != "oracle") {
         std::cout << "Invalid value passed to -m '" << s << "'\n";
         exit(1);
     }
@@ -289,6 +291,8 @@ int main(const int argc, const char*argv[]) {
             ms_result = msIndex.ms_psi(seq_info.seq_content, seq_info.seq_len);
         } else if (o.mode == "dual") {
             ms_result = msIndex.ms_dual(seq_info.seq_content, seq_info.seq_len);
+        } else if (o.mode == "phiskip") {
+            ms_result = msIndex.ms_phiskip(seq_info.seq_content, seq_info.seq_len);
         } else if (o.mode == "oracle") {
             ms_result = msIndex.ms_oracle(seq_info.seq_content, seq_info.seq_len, repositioning_oracle);
         } else {

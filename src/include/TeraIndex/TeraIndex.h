@@ -324,6 +324,8 @@ class TeraIndex {
         phi_steps = 0;
         psi_steps = 0;
         mismatches = 0;
+        skip_lce_calls = 0;
+        phi_skips = 0;
     }
 
     void print_ms_stats(std::ostream& out) const {
@@ -331,6 +333,8 @@ class TeraIndex {
         out << "\t  Phi Steps: " << phi_steps << std::endl;
         out << "\t  Psi Steps: " << psi_steps << std::endl;
         out << "\tTotal Steps: " << phi_steps + psi_steps << std::endl;
+        out << "\t  LCE Calls: " << skip_lce_calls << " (dual and phiskip only)" << std::endl;
+        out << "\t  Phi Skips: " << phi_skips << " (dual and phiskip only)" << std::endl;
     }
     #endif
     
@@ -838,6 +842,14 @@ class TeraIndex {
         });
     }
 
+    std::pair<std::vector<uint32_t>, std::vector<uint64_t>> ms_phiskip(const char* pattern, const uint64_t m) {
+        return ms_loop(pattern, m, [this](MSState& state, const uint8_t c) {
+            reposition_explicit(state, c, [this](const MSState& state, const PosDist& end, const uint64_t lower_lim) {
+                return phiskip_lce(state, end, lower_lim);
+            });
+        });
+    }
+
     std::pair<std::vector<uint32_t>, std::vector<uint64_t>> ms_oracle(const char* pattern, const uint64_t m, std::vector<uint32_t>& repositioning_oracle) {
         size_t curr_oracle_index = 0;
         
@@ -885,6 +897,9 @@ private:
     size_t phi_steps;
     size_t psi_steps;
     size_t mismatches;
+    // LCE calls made by dual_lce or phiskip_lce, and how many of them skipped the Phi extension
+    size_t skip_lce_calls;
+    size_t phi_skips;
     #endif
 
     // ================================ General helper functions ================================
@@ -1238,6 +1253,28 @@ private:
     }
 
     /**
+    * @brief LCE between start and end position, where end is a run head or tail, using Phi and PLCP samples unless the matched length is shorter than the BWT distance, in which case Psi is used
+    *
+    * This applies the same skip rule as dual_lce without interleaving the two methods.
+    * When state.length < end.dist, the Psi extension is bounded by state.length steps and the Phi extension needs end.dist - 1 steps,
+    * so Psi is run alone, exactly as dual_lce does when it skips Phi. Otherwise Phi is run alone with the same lower_lim early exit that dual_lce uses.
+    *
+    * @param state Current MS state
+    * @param end End position (predecessor or successor position)
+    * @param lower_lim If the minimum LCE goes beneath this value, stop and return 0 (only used by the Phi extension)
+    * @return uint64_t The LCE between the start and end position (capped at the current matched length when Psi is used)
+    */
+    uint64_t phiskip_lce(const MSState& state, const PosDist& end, const uint64_t lower_lim = 0) {
+        bool skip_phi = (state.length < end.dist);
+        #ifdef STATS
+        ++skip_lce_calls;
+        if (skip_phi) { ++phi_skips; }
+        #endif
+        if (skip_phi) { return psi_lce(state, end); }
+        return phi_lce(state, end, lower_lim);
+    }
+
+    /**
     * @brief LCE between start and end position, where end is a run head or tail, by using both Phi and Psi, with early stopping conditions
     * 
     * @tparam consecutive_steps Number of consecutive steps to take before switching to the other extension method, best if multiple of 2 since Psi uses 2 mapping steps per iteration
@@ -1282,6 +1319,10 @@ private:
         };
         // In this case, we know the psi will finish first with its early stopping condition met, so we can skip the phi computation
         bool skip_phi = (state.length < end.dist);
+        #ifdef STATS
+        ++skip_lce_calls;
+        if (skip_phi) { ++phi_skips; }
+        #endif
         while (true) {
             if (!skip_phi && phi_turn()) {
                 if (!phi_condition()) { break; } // If distance is reached, break and return the current LCE
