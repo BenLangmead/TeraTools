@@ -326,6 +326,9 @@ class TeraIndex {
         mismatches = 0;
         skip_lce_calls = 0;
         phi_skips = 0;
+        for (auto& row : ld_hist) { row.fill(0); }
+        ns_calls.fill(0); ns_steps.fill(0); ns_phi_first.fill(0); ns_psi_first.fill(0);
+        ns_phi_dist = ns_phi_lowerlim = ns_psi_mismatch = ns_psi_cap = ns_psi_end = 0;
     }
 
     void print_ms_stats(std::ostream& out) const {
@@ -335,6 +338,24 @@ class TeraIndex {
         out << "\tTotal Steps: " << phi_steps + psi_steps << std::endl;
         out << "\t  LCE Calls: " << skip_lce_calls << " (dual and phiskip only)" << std::endl;
         out << "\t  Phi Skips: " << phi_skips << " (dual and phiskip only)" << std::endl;
+        if (skip_lce_calls == 0) { return; }
+        // Bucket b > 0 holds values in [2^(b-1), 2^b); bucket 0 holds 0.
+        out << "\tLCE call histogram over (bucket of length l, bucket of BWT distance d), dual and phiskip only" << std::endl;
+        out << "\tLDH\tl_bucket\td_bucket\tcalls" << std::endl;
+        for (size_t lb = 0; lb < stat_buckets; ++lb) {
+            for (size_t db = 0; db < stat_buckets; ++db) {
+                if (ld_hist[lb][db]) { out << "\tLDH\t" << lb << "\t" << db << "\t" << ld_hist[lb][db] << std::endl; }
+            }
+        }
+        out << "\tCalls that do not skip Phi, by bucket of d: calls, LCE move steps, and (dual only) which extension stopped the loop" << std::endl;
+        out << "\tNS\td_bucket\tcalls\tsteps\tphi_first\tpsi_first" << std::endl;
+        for (size_t db = 0; db < stat_buckets; ++db) {
+            if (ns_calls[db]) {
+                out << "\tNS\t" << db << "\t" << ns_calls[db] << "\t" << ns_steps[db] << "\t" << ns_phi_first[db] << "\t" << ns_psi_first[db] << std::endl;
+            }
+        }
+        out << "\tNSSTOP\tphi_dist_reached\t" << ns_phi_dist << "\tphi_lower_lim\t" << ns_phi_lowerlim
+            << "\tpsi_mismatch\t" << ns_psi_mismatch << "\tpsi_length_cap\t" << ns_psi_cap << "\tpsi_pattern_end\t" << ns_psi_end << std::endl;
     }
     #endif
     
@@ -900,6 +921,14 @@ private:
     // LCE calls made by dual_lce or phiskip_lce, and how many of them skipped the Phi extension
     size_t skip_lce_calls;
     size_t phi_skips;
+    // Distributions over the LCE calls of dual_lce and phiskip_lce, in log2 buckets (see stat_bucket)
+    static constexpr size_t stat_buckets = 65;
+    std::array<std::array<size_t, stat_buckets>, stat_buckets> ld_hist; // [bucket of length][bucket of dist]
+    // Calls that do not skip Phi, by bucket of dist: count, LCE move steps, and in dual which extension ended the loop
+    std::array<size_t, stat_buckets> ns_calls, ns_steps, ns_phi_first, ns_psi_first;
+    // Why the loop ended on those calls in dual
+    size_t ns_phi_dist, ns_phi_lowerlim, ns_psi_mismatch, ns_psi_cap, ns_psi_end;
+    static size_t stat_bucket(uint64_t x) { return x == 0 ? 0 : 64 - __builtin_clzll(x); }
     #endif
 
     // ================================ General helper functions ================================
@@ -1269,9 +1298,19 @@ private:
         #ifdef STATS
         ++skip_lce_calls;
         if (skip_phi) { ++phi_skips; }
+        ++ld_hist[stat_bucket(state.length)][stat_bucket(end.dist)];
         #endif
         if (skip_phi) { return psi_lce(state, end); }
+        #ifdef STATS
+        const size_t db = stat_bucket(end.dist);
+        const size_t steps_before = phi_steps;
+        uint64_t result = phi_lce(state, end, lower_lim);
+        ++ns_calls[db];
+        ns_steps[db] += phi_steps - steps_before;
+        return result;
+        #else
         return phi_lce(state, end, lower_lim);
+        #endif
     }
 
     /**
@@ -1322,9 +1361,15 @@ private:
         #ifdef STATS
         ++skip_lce_calls;
         if (skip_phi) { ++phi_skips; }
+        ++ld_hist[stat_bucket(state.length)][stat_bucket(end.dist)];
+        const size_t steps_before = phi_steps + psi_steps;
+        bool stopped_in_phi = false; // which extension's turn it was when the loop ended
         #endif
         while (true) {
             if (!skip_phi && phi_turn()) {
+                #ifdef STATS
+                stopped_in_phi = true;
+                #endif
                 if (!phi_condition()) { break; } // If distance is reached, break and return the current LCE
                 uint64_t lcp = get_PLCP(phi_extension_position);
                 phi_lce = std::min(phi_lce, lcp);
@@ -1341,6 +1386,9 @@ private:
                 #endif
             }
             else {
+                #ifdef STATS
+                stopped_in_phi = false;
+                #endif
                 if (!psi_condition()) { break; }
                 ++psi_lce;
                 // Will only change from above if early stopping condition is met
@@ -1359,6 +1407,22 @@ private:
             }
         }
         
+        #ifdef STATS
+        if (!skip_phi) {
+            const size_t db = stat_bucket(end.dist);
+            ++ns_calls[db];
+            ns_steps[db] += phi_steps + psi_steps - steps_before;
+            if (stopped_in_phi) {
+                ++ns_phi_first[db];
+                if (phi_i >= end.dist) { ++ns_phi_dist; } else { ++ns_phi_lowerlim; }
+            } else {
+                ++ns_psi_first[db];
+                if (psi_i >= state.m) { ++ns_psi_end; }
+                else if (psi_lce >= state.length) { ++ns_psi_cap; }
+                else { ++ns_psi_mismatch; }
+            }
+        }
+        #endif
         if (!phi_condition() && !psi_condition()) {
             return std::min(phi_lce, psi_lce);
         }
