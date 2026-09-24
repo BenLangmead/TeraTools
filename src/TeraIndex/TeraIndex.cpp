@@ -84,6 +84,11 @@ int main(const int argc, const char*argv[]) {
         std::cerr << "Output file '" << o.oindex << "' failed to open for reading!\n";
         exit(1);
     }
-    TeraIndex().constructFromLCPIndexFileWriteAndClear(in, out, o.v,  o.vLF, o.vPsi, o.vText, o.vPhi, o.vInvPhi);
+    try {
+        TeraIndex().constructFromLCPIndexFileWriteAndClear(in, out, o.v,  o.vLF, o.vPsi, o.vText, o.vPhi, o.vInvPhi);
+    } catch (const std::runtime_error& e) {
+        std::cerr << "ERROR: TeraIndex failed its consistency check on '" << o.inputFile << "': " << e.what() << std::endl;
+        exit(1);
+    }
     if (o.v >= TIME) { Timer.stop(); } //TeraIndex
 }

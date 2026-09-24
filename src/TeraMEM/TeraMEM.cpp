@@ -100,7 +100,12 @@ int main(const int argc, const char *argv[]) {
 
     if (o.v >= TIME) { Timer.start("Loading index"); }
     TeraIndex ind;
-    ind.load(in);
+    try {
+        ind.load(in);
+    } catch (const std::runtime_error& e) {
+        std::cerr << "ERROR: Index file '" << o.inputFile << "' failed its consistency check: " << e.what() << std::endl;
+        exit(1);
+    }
     if (o.v >= TIME) { Timer.stop(); }
 
     if (o.v >= TIME) { Timer.start("Computing MEMs"); }
