@@ -1,6 +1,8 @@
 #ifndef R_SA_LCP_MOVESTRUCTURE_H
 #define R_SA_LCP_MOVESTRUCTURE_H
 #include "util/packedTripleVector.h"
+#include <tuple>
+#include <utility>
 
 enum FFMethod { LINEAR, EXPONENTIAL };
 
@@ -271,7 +273,7 @@ struct MoveStructureTable {
             res.data.set<2>(invPi[i], data.get<2>(i));
             outPoint.offset += data.get<2>(i);
         }
-        return {res, pi, invPi};
+        return std::make_tuple(std::move(res), std::move(pi), std::move(invPi));
     }
 
     void print() const {
@@ -557,7 +559,7 @@ struct MoveStructureStartTable {
             outPoint.offset += data.get<2>(i + 1) - data.get<2>(i);
         }
         res.data.set<2>(numIntervals, data.get<2>(numIntervals));
-        return {res, pi, invPi};
+        return std::make_tuple(std::move(res), std::move(pi), std::move(invPi));
     }
 
     void print() const {
