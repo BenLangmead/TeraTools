@@ -181,7 +181,12 @@ int main(const int argc, const char*argv[]) {
 	if (o.v >= TIME) { Timer.start("Loading index " + o.indexFile); }
 	std::ifstream in(o.indexFile, std::ios::binary);
 	TeraIndex msIndex;
-	msIndex.load(in);
+	try {
+		msIndex.load(in);
+	} catch (const std::runtime_error& e) {
+		std::cerr << "ERROR: Index file '" << o.indexFile << "' failed its consistency check: " << e.what() << std::endl;
+		exit(1);
+	}
 	if (!in) {
 		std::cerr << "ERROR: Failed to read index file '" << o.indexFile << "'; it may be truncated or not a TeraMS index." << std::endl;
 		exit(1);
