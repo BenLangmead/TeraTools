@@ -465,8 +465,8 @@ class TeraIndex {
     }
     #endif
 
-    std::vector<uint32_t> load_oracle(std::istream& in) {
-        std::vector<uint32_t> repositioning_oracle;
+    std::vector<uint64_t> load_oracle(std::istream& in) {
+        std::vector<uint64_t> repositioning_oracle;
         sdsl::load(repositioning_oracle, in);
         return repositioning_oracle;
     }
@@ -959,7 +959,7 @@ class TeraIndex {
         });
     }
 
-    std::pair<std::vector<uint32_t>, std::vector<uint64_t>> ms_oracle(const char* pattern, const uint64_t m, std::vector<uint32_t>& repositioning_oracle) {
+    std::pair<std::vector<uint32_t>, std::vector<uint64_t>> ms_oracle(const char* pattern, const uint64_t m, std::vector<uint64_t>& repositioning_oracle) {
         size_t curr_oracle_index = 0;
         
         // Initial state is the end of the BWT, end of pattern, length of 0
@@ -998,7 +998,8 @@ private:
     // ================================ Oracle ================================
     #ifdef WRITE_ORACLE
     bool write_oracle = false;
-    std::vector<uint32_t> repositioning_oracle;
+    // Alternating run indices and lengths, 64-bit for r >= 2^32.
+    std::vector<uint64_t> repositioning_oracle;
     #endif
 
     // ================================ MS Stats ================================
@@ -1261,7 +1262,7 @@ private:
         #endif
     }
 
-    void reposition_oracle(MSState& state, std::vector<uint32_t>& repositioning_oracle, size_t& curr_oracle_index) {
+    void reposition_oracle(MSState& state, std::vector<uint64_t>& repositioning_oracle, size_t& curr_oracle_index) {
         // An oracle written for a different pattern or index can run out early
         // or name a run that does not exist.
         if (curr_oracle_index + 1 >= repositioning_oracle.size() || repositioning_oracle[curr_oracle_index] >= LF.num_intervals())

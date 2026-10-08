@@ -256,7 +256,7 @@ int main(const int argc, const char*argv[]) {
         thread_local static std::pair<std::vector<uint32_t>, std::vector<uint64_t>> ms_result;
 
         // Load repositioning oracle if needed
-        std::vector<uint32_t> repositioning_oracle;
+        std::vector<uint64_t> repositioning_oracle;
         if (o.mode == "oracle") {
             std::string oracleFile = o.patternFile + "." + seq_info.seq_name + ".oracle";
             std::ifstream in_oracle(oracleFile, std::ios::binary);
