@@ -3,6 +3,9 @@
 #include<array>
 #include<limits>
 #include<optional>
+#include<stdexcept>
+#include<string>
+#include<unordered_map>
 #include<sdsl/int_vector.hpp>
 #include"moveStructure/moveStructure.h"
 #include"util/util.h"
@@ -91,20 +94,153 @@ class TeraIndex {
 
         //std::cout << "starting rlbwt generation loop" << std::endl;
         //generate rlbwt
+        // By the LF property, the runs of a character c, taken in BWT order,
+        // map to consecutive F positions starting at the first F row of c.
+        // currentStarts maps each F position that the next run of some
+        // character must map to (the first F row of a character not seen yet,
+        // or the row after the image of the latest run of a character) to that
+        // character.
         for (uint64_t i = 0; i < numRuns; ++i) {
             auto p = LF.map({static_cast<uint64_t>(-1), i, 0});
-            if (p.interval < start.interval || (p.interval == start.interval && p.offset < start.offset))
+            const bool separator = p.interval < start.interval || (p.interval == start.interval && p.offset < start.offset);
+            if (separator)
                 rlbwt[i] = 0;
             else {
-                assert(currentStarts.count(pointToInt(p)));
-                rlbwt[i] = currentStarts[pointToInt(p)];
-                currentStarts.erase(pointToInt(p));
+                auto it = currentStarts.find(pointToInt(p));
+                if (it == currentStarts.end())
+                    throw std::runtime_error("TeraIndex: BWT run " + std::to_string(i) + " maps by LF to an F position that no character expects; the input index is inconsistent");
+                rlbwt[i] = it->second;
+                currentStarts.erase(it);
             }
+            // Separator runs are recognized by where they map, not through
+            // currentStarts, so they record nothing.
+            if (separator)
+                continue;
             p.offset += LF.data.get<2>(i);
             while (p.interval < numRuns && p.offset >= LF.data.get<2>(p.interval))
                 p.offset -= LF.data.get<2>(p.interval++);
             assert(p.interval != numRuns || p.offset == 0);
-            currentStarts[pointToInt(p)] = rlbwt[i];
+            // After the last run of the last character nothing follows, and the
+            // key of the end position, numRuns, equals that of the point
+            // (interval 0, offset 1), so it must not be recorded.
+            if (p.interval == numRuns)
+                continue;
+            // When this was the last run of its character, p is the first F row
+            // of the next character, whose entry may still be waiting for that
+            // character's first run. That entry must be kept, so an existing
+            // key is never overwritten. No other key can already be present:
+            // the expected positions of different characters lie in disjoint F
+            // ranges.
+            currentStarts.emplace(pointToInt(p), rlbwt[i]);
+        }
+        check_rlbwt_against_F();
+        check_rlbwt_against_LF();
+    }
+
+    // Consistency checks of rlbwt, run at the end of index construction and
+    // when an index is loaded. An rlbwt that disagrees with LF or F makes the
+    // matching statistics silently wrong (a character can look absent from the
+    // text), so both throw std::runtime_error instead. Each takes one pass over
+    // the runs and constant extra memory.
+
+    // Checks that each character labels as many rlbwt runs as F intervals.
+    // LF and Psi are inverse move tables over the same intervals, so the LF
+    // image of each BWT run is exactly one F interval, holding the run's
+    // character. Together with check_rlbwt_against_LF this pins down every run
+    // character: that check makes the runs of each character map to one
+    // contiguous block of F intervals, in character order, and this one makes
+    // each block as long as the true one. When Psi is loaded the row counts
+    // (runs weighted by interval length) are compared too.
+    void check_rlbwt_against_F() const {
+        const uint64_t numRuns = LF.num_intervals();
+        if (rlbwt.size() != numRuns || F.size() != numRuns)
+            throw std::runtime_error("TeraIndex: inconsistent index, rlbwt has " + std::to_string(rlbwt.size()) + " runs, LF " + std::to_string(numRuns) + " intervals and F " + std::to_string(F.size()) + " entries");
+        const bool withPsi = Psi.num_intervals() == numRuns;
+        std::array<uint64_t, 256> bwtRuns{}, fRuns{}, bwtRows{}, fRows{};
+        for (uint64_t i = 0; i < numRuns; ++i) {
+            if (rlbwt[i] >= bwtRuns.size() || F[i] >= fRuns.size())
+                throw std::runtime_error("TeraIndex: inconsistent index, run " + std::to_string(i) + " has an invalid character code");
+            ++bwtRuns[rlbwt[i]];
+            ++fRuns[F[i]];
+            if (withPsi) {
+                bwtRows[rlbwt[i]] += LF.get_length(i);
+                fRows[F[i]] += Psi.get_length(i);
+            }
+        }
+        for (uint64_t c = 0; c < bwtRuns.size(); ++c) {
+            if (bwtRuns[c] != fRuns[c])
+                throw std::runtime_error("TeraIndex: inconsistent index, character code " + std::to_string(c) + " labels " + std::to_string(bwtRuns[c]) + " rlbwt runs but " + std::to_string(fRuns[c]) + " F intervals; rebuild the index with a fixed TeraIndex");
+            if (bwtRows[c] != fRows[c])
+                throw std::runtime_error("TeraIndex: inconsistent index, character code " + std::to_string(c) + " occurs " + std::to_string(bwtRows[c]) + " times in rlbwt but " + std::to_string(fRows[c]) + " times in F; rebuild the index with a fixed TeraIndex");
+        }
+    }
+
+    // Checks rlbwt against LF alone, so it also runs when F and Psi are not
+    // loaded. The first F row of each character is computed from the rlbwt
+    // character counts. By the LF property, the runs of a character other
+    // than the separator, taken in BWT order, must map to consecutive F rows
+    // starting at its first F row, and separator runs must map into the
+    // separator rows at the top of F. (The LF of separator rows is not order
+    // preserving, since each sequence's separator leads back to that
+    // sequence's end, so their order within that range is not checked.)
+    void check_rlbwt_against_LF() const {
+        using IP = MoveStructureTable::IntervalPoint;
+        const uint64_t numRuns = LF.num_intervals();
+        if (rlbwt.size() != numRuns)
+            throw std::runtime_error("TeraIndex: inconsistent index, rlbwt has " + std::to_string(rlbwt.size()) + " runs but LF has " + std::to_string(numRuns));
+        std::array<uint64_t, 256> count{};
+        uint64_t total = 0;
+        for (uint64_t i = 0; i < numRuns; ++i) {
+            if (rlbwt[i] >= count.size())
+                throw std::runtime_error("TeraIndex: inconsistent index, rlbwt run " + std::to_string(i) + " has invalid character code " + std::to_string(rlbwt[i]));
+            count[rlbwt[i]] += LF.get_length(i);
+            total += LF.get_length(i);
+        }
+        if (total != totalLen)
+            throw std::runtime_error("TeraIndex: inconsistent index, the LF intervals cover " + std::to_string(total) + " rows but the text has " + std::to_string(totalLen));
+        // Moves p forward by len rows, leaving it normalized (offset less than
+        // the length of its interval, or interval numRuns at the end).
+        auto advance = [&] (IP p, uint64_t len) {
+            p.offset += len;
+            while (p.interval < numRuns && p.offset >= LF.get_length(p.interval))
+                p.offset -= LF.get_length(p.interval++);
+            return p;
+        };
+        // expected[c] is the F row the next run of c must map to.
+        std::array<IP, 256> expected;
+        IP p{static_cast<uint64_t>(-1), 0, 0};
+        for (uint64_t c = 0; c < count.size(); ++c) {
+            expected[c] = p;
+            p = advance(p, count[c]);
+        }
+        const IP separatorEnd = expected[1];
+        for (uint64_t i = 0; i < numRuns; ++i) {
+            const uint64_t c = rlbwt[i];
+            const IP q = LF.map({static_cast<uint64_t>(-1), i, 0});
+            if (c == 0) {
+                if (!(q < separatorEnd))
+                    throw std::runtime_error("TeraIndex: inconsistent index, rlbwt run " + std::to_string(i) + " is a separator run but LF maps it outside the separator rows of F; rebuild the index with a fixed TeraIndex");
+                continue;
+            }
+            if (q != expected[c])
+                throw std::runtime_error("TeraIndex: inconsistent index, rlbwt run " + std::to_string(i) + " has character code " + std::to_string(c) + " but LF maps it to an F row that does not continue that character's rows; rebuild the index with a fixed TeraIndex");
+            expected[c] = advance(q, LF.get_length(i));
+        }
+    }
+
+    // Checks PsiIntAtTop and PsiOffAtTop against LF and Psi by recomputing
+    // them, which catches entries truncated by a too narrow width.
+    void check_psi_at_top() const {
+        const uint64_t numRuns = LF.num_intervals();
+        if (PsiIntAtTop.size() != numRuns || PsiOffAtTop.size() != numRuns || Psi.num_intervals() != numRuns)
+            throw std::runtime_error("TeraIndex: inconsistent index, PsiIntAtTop, PsiOffAtTop, LF and Psi have different numbers of runs");
+        uint64_t L_pos = 0, F_pos = 0, F_int = 0;
+        for (uint64_t L_int = 0; L_int < numRuns; ++L_int) {
+            if (PsiIntAtTop[L_int] != F_int || PsiOffAtTop[L_int] != L_pos - F_pos)
+                throw std::runtime_error("TeraIndex: inconsistent index, PsiIntAtTop or PsiOffAtTop of run " + std::to_string(L_int) + " does not locate the run's first row in Psi; rebuild the index with a fixed TeraIndex");
+            L_pos += LF.get_length(L_int);
+            while (F_int < numRuns && F_pos + Psi.get_length(F_int) <= L_pos)
+                F_pos += Psi.get_length(F_int++);
         }
     }
 
@@ -120,9 +256,16 @@ class TeraIndex {
             intAtBot[i] = invPi[intAtTop[(i+1)%intAtTop.size()]];
     }
 
+    // For each BWT run, PsiIntAtTop and PsiOffAtTop give the Psi interval
+    // and the offset within it of the run's first row. The offset is bounded
+    // by the length of a Psi interval, so its width is that of the Psi length
+    // field. The width of the LF offset field does not bound it: that field
+    // only needs to hold the largest offset LF actually maps to, which can be
+    // far smaller (for the 30 bp reference (AC)^15 it is 1 bit while
+    // PsiOffAtTop needs 4).
     void generatePsiAtTop() {
         PsiIntAtTop = sdsl::int_vector<>(LF.num_intervals(), 0, LF.data.a);
-        PsiOffAtTop = sdsl::int_vector<>(LF.num_intervals(), 0, LF.data.b);
+        PsiOffAtTop = sdsl::int_vector<>(LF.num_intervals(), 0, Psi.data.c);
         uint64_t L_pos = 0;
         uint64_t F_pos = 0;
         uint64_t F_int = 0;
@@ -226,6 +369,7 @@ class TeraIndex {
         test(vLF, LF, "LF");
         generateRLBWTfromLFPsiandF();
         generatePsiAtTop();
+        check_psi_at_top();
         if (vText) {
             if (v >= TIME) { Timer.start("Recovering texts from LF and Psi"); }
             if (recoverTextLF() == recoverTextPsi()){
@@ -353,7 +497,9 @@ class TeraIndex {
     void load(std::istream& in, const uint32_t components = all_components) {
         const bool seekable = in.tellg() != std::istream::pos_type(-1);
         sdsl::load(totalLen, in);
-        load_or_skip_int_vector(F, component_F, components, in, seekable);
+        // F holds one small code per run, so it is always read: the rlbwt
+        // consistency check below needs it.
+        load_or_skip_int_vector(F, component_F, components | component_F, in, seekable);
         load_or_skip_int_vector(rlbwt, component_rlbwt, components, in, seekable);
         load_or_skip_move_table(Psi, component_Psi, components, in, seekable);
         load_or_skip_move_table(LF, component_LF, components, in, seekable);
@@ -382,6 +528,19 @@ class TeraIndex {
                 in.seekg(pos);
             }
         }
+        // An index whose rlbwt disagrees with LF or F would give wrong
+        // answers, so it is rejected here with std::runtime_error. A stream
+        // that failed is left for the caller to report instead.
+        if (in && (loaded_components & (component_rlbwt | component_LF)) == (component_rlbwt | component_LF)) {
+            check_rlbwt_against_LF();
+            check_rlbwt_against_F();
+        }
+        const uint32_t forPsiAtTop = component_LF | component_Psi | component_PsiIntAtTop | component_PsiOffAtTop;
+        if (in && (loaded_components & forPsiAtTop) == forPsiAtTop)
+            check_psi_at_top();
+        // F was loaded only for the check when the caller skipped it.
+        if (!(loaded_components & component_F))
+            F = sdsl::int_vector<>();
     }
 
     // Throws std::logic_error naming the components in needed that load() skipped.

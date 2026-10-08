@@ -4,7 +4,7 @@
 
 struct packedTripleVector {
     typedef uint64_t size_type;
-    uint8_t a,b,c,width;
+    uint8_t a = 0, b = 0, c = 0, width = 0;
     sdsl::bit_vector data;
 
     packedTripleVector() = default;
@@ -60,7 +60,9 @@ struct packedTripleVector {
     }
 
     uint64_t size() const {
-        return data.size()/width;
+        // A table that was never built or loaded (lean loading skips it) has
+        // width 0 and no rows.
+        return width ? data.size()/width : 0;
     }
 };
             
