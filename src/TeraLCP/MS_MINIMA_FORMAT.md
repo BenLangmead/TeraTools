@@ -41,14 +41,15 @@ Header, 48 bytes:
 | 16..23 | `r`, number of runs (records) |
 | 24..31 | `n`, total BWT length |
 | 32..39 | total number of stored (offset, value) pairs over all runs |
-| 40..47 | `input_runs`, the number of runs in the input RLBWT, or 0 if unknown |
+| 40..47 | `input_runs`, the number of maximal runs of the input BWT, or 0 if unknown |
 
 Flags:
 
 * bit 0: header integers are little-endian (always set);
 * bit 1: `input_runs` is filled in;
-* bit 2: the run numbering differs from the input's run decomposition (only
-  possible for `-f fmd` input; see below).
+* bit 2: the records follow TeraLCP's internal runs, in which every separator
+  is its own run, rather than the input's runs (only for `-f lcp_index` input
+  given neither `--fmd` nor `--rlbwt-meta`; see below).
 
 Then `r` records, one per BWT run in BWT order (run 0 holds row 0):
 
@@ -66,32 +67,41 @@ the file ends right after record `r - 1`.
 
 ## Run numbering
 
-Run `i` of the file is the `i`-th run of TeraLCP's internal RLBWT, which
-differs from a plain maximal-run decomposition in two ways:
+TeraLCP numbers runs internally as its input decodes them, except that every
+separator (code 0) is its own run of length 1, even where several separators
+are adjacent in the BWT. The records of this file follow the input's runs
+instead:
 
-* **Sentinel runs are split.** Every occurrence of the sentinel (code 0) is its
-  own run of length 1, even when several sentinels are adjacent in the BWT.
-* **`-f rlbwt` input goes through `rld_enc`**, which merges adjacent input runs
-  with the same head before the split above.
+* `-f fmd FILE`: record `i` describes the `i`-th **maximal run** of the BWT in
+  row order: a maximal block of rows with equal BWT symbols, where all
+  separators count as one symbol. A run of `l > 1` separators is therefore one
+  record of length `l`, whose interior LCP values are the LCP values at its rows
+  after the first (the tops of TeraLCP's split runs). Adjacent rld entries with
+  the same symbol, which TeraLCP holds as separate runs, are likewise one
+  record. This is the numbering of the `.bwt.heads`/`.bwt.len` files that
+  fmd2rlbwt writes for Orbit (one line per maximal run, a separator run written
+  as one `$` head byte; see Orbit's `src/ms/tools/fmd2rlbwt/FMD_RUNS.md`), so
+  Orbit-ms reads record `i` for its run `i`. `input_runs = r`, and flag bit 2
+  is clear. A merged run's stored values are found among its pieces' stored
+  values and the tops of its pieces after the first: a prefix (suffix) minimum
+  of the merged run inside a piece is also one of that piece, relative to the
+  piece's own top (to the next piece's top).
+* `-f rlbwt BASE`: record `i` describes line `i` of `BASE.bwt.heads`. TeraLCP
+  requires that no two adjacent non-sentinel runs share a head, that every
+  sentinel run has length 1 and that no run is empty, and exits with an error
+  before construction otherwise, so a successful run always has
+  `r == input_runs`. (The sentinel is the smallest head byte present.) For a
+  text with one sentinel this is again the maximal-run numbering. Heads/len
+  files written by TeraLCP itself (`-othresholds`) follow this convention.
+* `-f lcp_index FILE`: with `--fmd FMD` (the FMD the index was built from) the
+  records follow the FMD's maximal runs as for `-f fmd`; with
+  `--rlbwt-meta BASE` they follow `BASE.bwt.heads` as for `-f rlbwt`; with
+  neither they follow TeraLCP's internal runs, `input_runs` is 0 and flag bit 2
+  is set.
 
-Consequences by input format:
-
-* `-f rlbwt BASE`: record `i` describes line `i` of `BASE.bwt.heads` exactly
-  when no two adjacent non-sentinel runs share a head, every sentinel run has
-  length 1 and no run is empty. TeraLCP checks this before construction and
-  exits with an error otherwise, so a successful run always has
-  `r == input_runs` and flag bit 2 clear. (The sentinel is the smallest head
-  byte present.) Heads/len files written by TeraLCP itself (`-othresholds`)
-  already follow this convention.
-* `-f fmd`: records follow the runs that `rld_dec` decodes from the FMD, with
-  each run of `l` sentinels replaced by `l` runs of length 1. `input_runs` is
-  the raw `rld_dec` run count; when sentinel runs had to be split, flag bit 2
-  is set and TeraLCP prints a warning. The `.bwt.heads`/`.bwt.len` files that
-  `-othresholds` writes for the same FMD use TeraLCP's numbering and so line up
-  with this file record for record.
-* `-f lcp_index`: records follow the index's numbering (the one it was built
-  with). With `--rlbwt-meta BASE`, the heads/len check above is applied and the
-  index's run count must equal the heads count; otherwise `input_runs` is 0.
+LCP values are those of the text TeraLCP indexes, in which separators are
+distinct symbols, so a common prefix never extends over a separator, whatever
+symbol a run dump writes for it.
 
 ## Interaction with other outputs
 
@@ -101,13 +111,17 @@ Consequences by input format:
 * with `-othresholds` and neither `-orlcp` nor `-oindex`: the minima are
   produced by the destructive parallel thresholds pass;
 * with `-orlcp`: one pass writes both files;
-* with `-oindex`: the pass keeps the index in memory (non-destructive) so it
-  can still be serialized afterwards.
+* with `-oindex`: the index is written before the pass, so the pass can free
+  it as it goes.
+
+`-ophi` (src/TeraLCP/PHI_EXPORT_FORMAT.md) comes from the same pass and the same
+spill and bucket files: requesting both outputs costs one pass and one reorder.
 
 ## Resources
 
 The per-run pass appends records to one spill file per thread
-(`FILE.tmp.t<i>`), keyed by the Phi-interval index that produced them. The
+(`FILE.tmp.t<i>`, next to the `-ominima` file, or next to the `-ophi` file when
+only that is requested), keyed by the Phi-interval index that produced them. The
 serial chain walk that orders runs then turns an existing packed per-run array
 (`r * ceil(log2 r)` bits) into the map from Phi interval to run number, so no
 additional run-sized array is allocated. The records are distributed into at
@@ -123,7 +137,11 @@ temporary files are removed on success.
 * `src/TeraLCP/ms_minima_dump.py FILE [--summary]` prints the header and one
   line per run: `run<TAB>top<TAB>count<TAB>off:val,off:val,...`.
 * `src/TeraLCP/testing/ms_minima_check.cpp` recomputes the expected records
-  from `BASE.bwt.heads`/`BASE.bwt.len` by BWT inversion and compares.
+  from `BASE.bwt.heads`/`BASE.bwt.len` by BWT inversion and compares (pass
+  `--maximal` for an FMD's heads/len as `-othresholds` writes them).
+* `src/TeraLCP/testing/fmd_outputs_brute.py FASTA --minima FILE --phi FILE`
+  builds the text of an FMD from the FASTA it was built from, sorts its
+  suffixes and compares both outputs.
 * `src/TeraLCP/testing/ms_minima_brute.py` builds a BWT and the expected records
   from a text by sorting rotations; `ms_minima_tsv.py` derives them from a
   per-run LCP table.

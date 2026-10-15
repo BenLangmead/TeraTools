@@ -48,10 +48,13 @@ The grlBWT-to-TeraLCP adapter and the end-to-end cross-tool validation against M
 pfp-thresholds pipeline, over both the ropeBWT3 and grlBWT construction paths — live
 in [thresh-tools](https://github.com/BenLangmead/thresh-tools).
 
-## ms minima tests
+## ms minima and phi export tests
 
 `bash test/run_ms_minima_tests.sh` (or `make -C src/TeraLCP test-minima`) checks
-the `-ominima` output (format in `src/TeraLCP/MS_MINIMA_FORMAT.md`) against a
+the `-ominima` output (format in `src/TeraLCP/MS_MINIMA_FORMAT.md`) and the
+`-ophi` output (format in `src/TeraLCP/PHI_EXPORT_FORMAT.md`) against a
 brute-force reference built from random texts, a BWT-inversion checker on FMD
-inputs, across thread counts and reorder bucket sizes, and in combination with
-`-orlcp`, `-othresholds` and `-oindex`. It needs python3 and a C++ compiler.
+inputs, suffix sorting of the texts of FMDs built from random FASTAs
+(`src/TeraLCP/testing/fmd_outputs_brute.py`), across thread counts and reorder
+bucket sizes, and in combination with `-orlcp`, `-othresholds` and `-oindex`.
+It needs python3 and a C++ compiler.
