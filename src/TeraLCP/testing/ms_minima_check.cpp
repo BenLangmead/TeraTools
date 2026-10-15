@@ -1,14 +1,17 @@
 // Independent checker for TeraLCP -ominima output, starting from an RLBWT.
 //
-// Usage: ms_minima_check BASE [MINIMA_FILE] [--dump]
+// Usage: ms_minima_check BASE [MINIMA_FILE] [--dump] [--maximal]
 //
 // Reads BASE.bwt.heads / BASE.bwt.len (smallest head byte is the sentinel),
 // inverts the BWT with rank-based LF to recover every string and the suffix
 // array, computes LCP with Kasai's algorithm (extension stops at a sentinel),
-// forms runs (maximal blocks of equal non-sentinel characters, one run per
-// sentinel), and computes each run's top and prefix/suffix minima directly from
-// their definitions. With MINIMA_FILE it compares against that file; with --dump
-// it prints the expected records in ms_minima_dump.py's format.
+// forms runs (maximal blocks of equal non-sentinel characters and one run per
+// sentinel, as -f rlbwt input numbers them, or with --maximal maximal blocks of
+// equal characters, sentinels included, as -f fmd input numbers them), and
+// computes each run's top and prefix/suffix minima directly from their
+// definitions. With MINIMA_FILE it compares against
+// that file; with --dump it prints the expected records in ms_minima_dump.py's
+// format.
 //
 // Needs about 11 bytes of RAM per BWT character; n must be below 2^32.
 #include <algorithm>
@@ -36,13 +39,14 @@ static bool readVarint(const std::vector<unsigned char>& d, size_t& pos, uint64_
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: ms_minima_check BASE [MINIMA_FILE] [--dump]\n";
+        std::cerr << "Usage: ms_minima_check BASE [MINIMA_FILE] [--dump] [--maximal]\n";
         return 2;
     }
     std::string base = argv[1], minPath;
-    bool dump = false;
+    bool dump = false, maximal = false;
     for (int i = 2; i < argc; ++i) {
         if (std::string(argv[i]) == "--dump") dump = true;
+        else if (std::string(argv[i]) == "--maximal") maximal = true;
         else minPath = argv[i];
     }
 
@@ -130,7 +134,8 @@ int main(int argc, char** argv) {
     }
     auto LCP = [&](uint64_t row) -> uint64_t { return plcp[SA[row]]; };
 
-    // Runs: maximal equal non-sentinel blocks; each sentinel its own run.
+    // Runs: maximal blocks of equal characters, each sentinel its own run
+    // unless maximal.
     std::vector<std::pair<uint64_t, uint64_t>> runs;   // (start, length)
     {
         uint64_t k = 0;
@@ -138,7 +143,7 @@ int main(int argc, char** argv) {
         for (size_t i = 0; i < heads.size(); ++i) {
             const int c = code[heads[i]];
             for (uint64_t j = 0; j < lens[i]; ++j, ++k) {
-                if (c == 0 || c != prevCode || runs.empty()) runs.push_back({k, 1});
+                if (c != prevCode || runs.empty() || (c == 0 && !maximal)) runs.push_back({k, 1});
                 else ++runs.back().second;
                 prevCode = c;
             }

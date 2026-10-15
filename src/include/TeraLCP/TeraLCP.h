@@ -20,22 +20,29 @@
 static constexpr const char* lcp_index_extension = ".lcp_index";
 
 /*
- * Writer for the per-run LCP minima consumed by the ms matching-statistics
- * index (the -ominima output).
+ * Writer for two per-run outputs of one per-run pass: the LCP minima consumed by
+ * the ms matching-statistics index (-ominima) and the per-run suffix array and
+ * LCP samples from which Orbit-tms builds phi and phi_inv (-ophi). Either output
+ * may be requested alone.
  *
- * File layout (TLMSM v1, written by finish()): a 48-byte header holding the
- * magic 93 'T' 'L' 'M' 'S' 'M' 00 01, a flags byte (FLAG_* below), and at bytes
- * 16, 24, 32 and 40 the little-endian 64-bit record count, BWT length, total
- * number of stored pairs and input_runs (0 if unknown). Then one record per run
- * in BWT order, all ULEB128: top_i, the count of stored pairs, and per pair the
- * offset gap from the previous stored offset (or from 0) and the value.
+ * File layouts (written by Outputs): each file starts with a 48-byte header of
+ * an 8-byte magic, a flags byte and little-endian 64-bit counts at bytes 16, 24,
+ * 32 and 40. -ominima (TLMSM v1, magic 93 'T' 'L' 'M' 'S' 'M' 00 01): flags
+ * FLAG_* below, then the record count, BWT length, total number of stored pairs
+ * and input_runs (0 if unknown); then one record per run in BWT order, all
+ * ULEB128: top_i, the count of stored pairs, and per pair the offset gap from
+ * the previous stored offset (or from 0) and the value. -ophi (TLPHI v1, magic
+ * 93 'T' 'L' 'P' 'H' 'I' 00 01): byte 9 is the field width w in bytes, then the
+ * record count, BWT length and number of maximal runs; then per record
+ * SA[s], SA[e] and top_i, each w bytes little-endian.
  *
  * For BWT run i with rows s..e, top_i = LCP[s] and top_{i+1} the next run's top
- * (+infinity after the last run), the stored set is the union of
+ * (+infinity after the last run), the stored minima set is the union of
  *   prefix minima: interior offsets o (1 <= o < len) whose value is strictly
  *                  below top_i and below every interior value at a smaller offset;
  *   suffix minima: interior offsets o whose value is strictly below top_{i+1}
  *                  and below every interior value at a larger offset.
+ * The phi record of run i is (SA[s], SA[e], top_i).
  *
  * The parallel per-run pass (TeraLCP::ComputeMinLCPRunParallelDestructive) walks
  * each run bottom-up and fills a thread's Scratch: `suf` gets the suffix minima
@@ -48,16 +55,35 @@ static constexpr const char* lcp_index_extension = ".lcp_index";
  * keyed by the Phi-interval index that produced it. finish() receives the map
  * from Phi-interval index to BWT run number, distributes the records into
  * buckets of consecutive run numbers on disk, then sorts each bucket in memory
- * and appends it to the output, so the output is in BWT run order.
+ * and writes the outputs in BWT run order.
+ *
+ * Internal runs are TeraLCP's runs: one per run its input decodes, except that
+ * every separator (code 0) is its own run of length 1. The outputs describe the
+ * BWT's maximal runs instead. Each Group is a maximal run that TeraLCP holds as
+ * several internal runs, its pieces: a run of several separators, or adjacent
+ * input runs with the same symbol. The minima output writes a group as one
+ * record, whose interior values that can be prefix or suffix minima are among
+ * the pieces' stored values and the tops of the pieces after the first. The phi
+ * output writes a group of pieces with one symbol as one record, and a run of
+ * separators as one record per row, since every separator row starts its own
+ * phi interval.
  */
 class MsMinimaWriter {
 public:
     static constexpr uint64_t INF = static_cast<uint64_t>(-1);
     static constexpr size_t HEADER_BYTES = 48;
-    // Header flag bits.
+    // Minima header flag bits.
     static constexpr unsigned char FLAG_LE = 1;              // header integers are little-endian
     static constexpr unsigned char FLAG_INPUT_RUNS = 2;      // input_runs field is filled in
-    static constexpr unsigned char FLAG_NUMBERING_DIFFERS = 4; // run numbering differs from the input's runs
+    static constexpr unsigned char FLAG_NUMBERING_DIFFERS = 4; // records do not follow the input's maximal runs
+
+    // Internal runs [first, first + pieces) form one maximal run. A separator
+    // run's pieces are its rows; other pieces have the lengths in lens.
+    struct Group {
+        uint64_t first, pieces;
+        bool separator;
+        std::vector<uint64_t> lens;
+    };
 
     struct Scratch {
         std::vector<std::pair<uint64_t, uint64_t>> stk, suf, merged;
@@ -69,19 +95,30 @@ public:
         char pad[64];
     };
 
-    MsMinimaWriter(const std::string& outPath, uint64_t inputRuns, bool numberingDiffers, uint64_t bucketBytes)
-        : outPath_(outPath), inputRuns_(inputRuns), numberingDiffers_(numberingDiffers),
-          bucketBytes_(std::max<uint64_t>(bucketBytes, 1)) {}
+    MsMinimaWriter(const std::string& minimaPath, const std::string& phiPath, uint64_t inputRuns,
+                   bool numberingDiffers, uint64_t bucketBytes, std::vector<Group> groups = {})
+        : minimaPath_(minimaPath), phiPath_(phiPath), tmpBase_(minimaPath.empty() ? phiPath : minimaPath),
+          inputRuns_(inputRuns), numberingDiffers_(numberingDiffers),
+          bucketBytes_(std::max<uint64_t>(bucketBytes, 1)), groups_(std::move(groups)) {
+        for (size_t g = 0; g < groups_.size(); ++g)
+            if (groups_[g].pieces < 2 || (g > 0 && groups_[g].first < groups_[g - 1].first + groups_[g - 1].pieces)
+                    || (!groups_[g].separator && groups_[g].lens.size() != groups_[g].pieces))
+                throw std::invalid_argument("ms minima: run groups must be sorted, disjoint, of at least 2 pieces, "
+                                            "and give the length of every piece of a non-separator run");
+    }
 
     ~MsMinimaWriter() { cleanup(); }
 
-    // Opens one spill file per thread next to the output (outPath.tmp.t<i>).
+    bool wantMinima() const { return !minimaPath_.empty(); }
+    bool wantPhi() const { return !phiPath_.empty(); }
+
+    // Opens one spill file per thread next to the output (<output>.tmp.t<i>).
     void begin(unsigned nthreads) {
         scratch_.clear();
         scratch_.resize(std::max(1u, nthreads));
         for (unsigned t = 0; t < scratch_.size(); ++t) {
             Scratch& s = scratch_[t];
-            s.path = outPath_ + ".tmp.t" + std::to_string(t);
+            s.path = tmpBase_ + ".tmp.t" + std::to_string(t);
             s.f = std::fopen(s.path.c_str(), "wb");
             if (!s.f) throw std::runtime_error("ms minima: cannot open spill file " + s.path + ": " + std::strerror(errno));
             s.buf.reserve(SPILL_FLUSH + 1024);
@@ -96,9 +133,10 @@ public:
     }
 
     // Emits the record for one run. s.suf and s.stk hold (step, value) pairs in
-    // increasing step order (step 1 is the run's bottom row, step runLen its top).
-    // Clears both on return.
-    void emit(Scratch& s, uint64_t phiInterval, uint64_t top, uint64_t runLen) {
+    // increasing step order (step 1 is the run's bottom row, step runLen its top);
+    // both are empty when the minima are not wanted. headSA and tailSA are the
+    // text positions of the run's top and bottom rows. Clears both on return.
+    void emit(Scratch& s, uint64_t phiInterval, uint64_t top, uint64_t runLen, uint64_t headSA, uint64_t tailSA) {
         // Stack entries not strictly below top_i are not prefix minima; the stack
         // increases from bottom to top, so they sit at its end.
         while (!s.stk.empty() && s.stk.back().second >= top) s.stk.pop_back();
@@ -122,6 +160,10 @@ public:
             putVarint(s.buf, s.merged[k].second);
             prevOff = off;
         }
+        if (wantPhi()) {
+            putVarint(s.buf, headSA);
+            putVarint(s.buf, tailSA);
+        }
         s.pairs += s.merged.size();
         s.bytes += s.buf.size() - before;
         ++s.records;
@@ -130,16 +172,17 @@ public:
         if (s.buf.size() >= SPILL_FLUSH) flush(s);
     }
 
-    // rankOf[j] is the BWT run number whose record was emitted with Phi-interval
-    // index j. Writes the output file in run order and removes all temporary files.
+    // rankOf[j] is the internal run number whose record was emitted with
+    // Phi-interval index j. Writes the outputs in run order and removes all
+    // temporary files.
     void finish(const sdsl::int_vector<>& rankOf, uint64_t runs, uint64_t totalLen, bool verbose) {
-        uint64_t spillBytes = 0, totalPairs = 0, records = 0;
+        uint64_t spillBytes = 0, records = 0;
         for (Scratch& s : scratch_) {
             flush(s);
             const bool closeFailed = (std::fclose(s.f) != 0);
             s.f = nullptr;
             if (closeFailed || s.writeFailed) throw std::runtime_error("ms minima: write failed on " + s.path);
-            spillBytes += s.bytes; totalPairs += s.pairs; records += s.records;
+            spillBytes += s.bytes; records += s.records;
             std::vector<std::pair<uint64_t, uint64_t>>().swap(s.stk);
             std::vector<std::pair<uint64_t, uint64_t>>().swap(s.suf);
             std::vector<std::pair<uint64_t, uint64_t>>().swap(s.merged);
@@ -147,6 +190,8 @@ public:
         }
         if (records != runs)
             throw std::runtime_error("ms minima: " + std::to_string(records) + " records for " + std::to_string(runs) + " runs");
+        if (!groups_.empty() && groups_.back().first + groups_.back().pieces > runs)
+            throw std::runtime_error("ms minima: a run group lies past the last run");
 
         // Bucket b holds runs [b*bucketRuns, (b+1)*bucketRuns). Sorting a bucket
         // needs its bytes plus one 64-bit offset per run in RAM.
@@ -156,14 +201,13 @@ public:
         const uint64_t bucketRuns = (runs + numBuckets - 1) / numBuckets;
         numBuckets = (runs + bucketRuns - 1) / bucketRuns;
         if (verbose)
-            std::cout << "ms minima: " << runs << " runs, " << totalPairs << " stored pairs, "
-                      << spillBytes << " spill bytes, " << numBuckets << " bucket(s) of up to "
-                      << bucketRuns << " runs" << std::endl;
+            std::cout << "per-run records: " << runs << " runs, " << spillBytes << " spill bytes, " << numBuckets
+                      << " bucket(s) of up to " << bucketRuns << " runs" << std::endl;
 
         bucketPaths_.clear();
         std::vector<std::FILE*> bf(numBuckets, nullptr);
         for (uint64_t b = 0; b < numBuckets; ++b) {
-            bucketPaths_.push_back(outPath_ + ".tmp.b" + std::to_string(b));
+            bucketPaths_.push_back(tmpBase_ + ".tmp.b" + std::to_string(b));
             bf[b] = std::fopen(bucketPaths_[b].c_str(), "wb");
             if (!bf[b]) {
                 for (uint64_t k = 0; k < b; ++k) std::fclose(bf[k]);
@@ -197,19 +241,7 @@ public:
         if (distributed != runs) ok = false;
         if (!ok) throw std::runtime_error("ms minima: failed while distributing spill records into buckets");
 
-        std::FILE* out = std::fopen(outPath_.c_str(), "wb");
-        if (!out) throw std::runtime_error("ms minima: cannot open output " + outPath_ + ": " + std::strerror(errno));
-        std::setvbuf(out, nullptr, _IOFBF, 1 << 22);
-        unsigned char h[HEADER_BYTES] = {0};
-        static const unsigned char MAGIC[8] = {0x93, 'T', 'L', 'M', 'S', 'M', 0x00, 0x01};
-        std::memcpy(h, MAGIC, 8);
-        h[8] = FLAG_LE | (inputRuns_ ? FLAG_INPUT_RUNS : 0) | (numberingDiffers_ ? FLAG_NUMBERING_DIFFERS : 0);
-        std::memcpy(h + 16, &runs, 8);
-        std::memcpy(h + 24, &totalLen, 8);
-        std::memcpy(h + 32, &totalPairs, 8);
-        std::memcpy(h + 40, &inputRuns_, 8);
-        ok = (std::fwrite(h, 1, HEADER_BYTES, out) == HEADER_BYTES);
-
+        Outputs out(*this, totalLen);
         std::vector<unsigned char> data;
         std::vector<uint64_t> start;
         for (uint64_t b = 0; ok && b < numBuckets; ++b) {
@@ -226,16 +258,16 @@ public:
             }
             for (uint64_t i = 0; ok && i < nb; ++i) {
                 if (start[i] == INF) { ok = false; break; }
-                size_t p = start[i];
-                ok = skipPayload(data, p);
-                if (ok && std::fwrite(data.data() + start[i], 1, p - start[i], out) != p - start[i]) ok = false;
+                ok = out.record(first + i, data, start[i]);
             }
             std::remove(bucketPaths_[b].c_str());
         }
         std::vector<unsigned char>().swap(data);
         std::vector<uint64_t>().swap(start);
-        if (std::fclose(out) != 0) ok = false;
-        if (!ok) throw std::runtime_error("ms minima: failed while writing " + outPath_ + " (missing, duplicate or corrupt run record)");
+        if (ok) ok = out.close(runs);
+        if (!ok) throw std::runtime_error("ms minima: failed while writing the outputs (missing, duplicate or corrupt run record)");
+        if (verbose && wantMinima())
+            std::cout << "ms minima: " << out.minimaRecords << " records, " << out.minimaPairs << " stored pairs" << std::endl;
         cleanup();
     }
 
@@ -243,10 +275,11 @@ private:
     static constexpr size_t SPILL_FLUSH = 1 << 20;
     static constexpr uint64_t MAX_BUCKETS = 128;
 
-    std::string outPath_;
+    std::string minimaPath_, phiPath_, tmpBase_;
     uint64_t inputRuns_;
     bool numberingDiffers_;
     uint64_t bucketBytes_;
+    std::vector<Group> groups_;
     std::vector<Scratch> scratch_;
     std::vector<std::string> bucketPaths_;
 
@@ -265,6 +298,188 @@ private:
         scratch_.clear();
         bucketPaths_.clear();
     }
+
+    /*
+     * The two output files, fed one internal run at a time in run order. The
+     * minima output holds back the pieces of a group until the next run's top
+     * is known, then writes the group as one merged record. Header fields that
+     * depend on the record count are written by close().
+     */
+    struct Outputs {
+        const MsMinimaWriter& w;
+        uint64_t totalLen;
+        std::FILE* fm = nullptr;
+        std::FILE* fp = nullptr;
+        unsigned width = 0;   // bytes per phi field
+        uint64_t minimaRecords = 0, minimaPairs = 0, phiRecords = 0;
+        size_t group = 0;     // the next group not yet complete
+        // The current group: its top, the next piece's offset in the merged
+        // run, and the (offset, value) candidates for its minima.
+        uint64_t groupTop = 0, groupBase = 0;
+        std::vector<std::pair<uint64_t, uint64_t>> cand;
+        bool pending = false;   // a complete group waits for the next top
+        uint64_t phiHead = 0, phiTop = 0;   // the first piece's, for the phi record of a group
+        std::string buf;
+        std::vector<unsigned char> pbuf;
+
+        Outputs(const MsMinimaWriter& writer, uint64_t n) : w(writer), totalLen(n) {
+            if (w.wantMinima()) fm = open(w.minimaPath_);
+            if (w.wantPhi()) {
+                fp = open(w.phiPath_);
+                const unsigned bits = n ? 64 - static_cast<unsigned>(__builtin_clzll(n)) : 1;
+                width = std::max(1u, (bits + 7) / 8);
+            }
+            unsigned char h[HEADER_BYTES] = {0};
+            if ((fm && std::fwrite(h, 1, HEADER_BYTES, fm) != HEADER_BYTES)
+                    || (fp && std::fwrite(h, 1, HEADER_BYTES, fp) != HEADER_BYTES)) {
+                closeAll();
+                throw std::runtime_error("ms minima: write failed on an output header");
+            }
+        }
+        ~Outputs() { closeAll(); }
+
+        static std::FILE* open(const std::string& path) {
+            std::FILE* f = std::fopen(path.c_str(), "wb");
+            if (!f) throw std::runtime_error("ms minima: cannot open output " + path + ": " + std::strerror(errno));
+            std::setvbuf(f, nullptr, _IOFBF, 1 << 22);
+            return f;
+        }
+        void closeAll() {
+            if (fm) { std::fclose(fm); fm = nullptr; }
+            if (fp) { std::fclose(fp); fp = nullptr; }
+        }
+
+        bool writePhi(uint64_t head, uint64_t tail, uint64_t top) {
+            pbuf.resize(3 * width);
+            const uint64_t v[3] = {head, tail, top};
+            for (int f = 0; f < 3; ++f)
+                for (unsigned k = 0; k < width; ++k) pbuf[f * width + k] = static_cast<unsigned char>(v[f] >> (8 * k));
+            ++phiRecords;
+            return std::fwrite(pbuf.data(), 1, pbuf.size(), fp) == pbuf.size();
+        }
+
+        // Writes the merged minima record of the complete group, whose next
+        // run's top is next. A candidate is kept if it is a strict running
+        // minimum from the top (a prefix minimum) or from next (a suffix
+        // minimum).
+        bool writeGroup(uint64_t next) {
+            const size_t l = cand.size();
+            std::vector<bool> keep(l, false);
+            uint64_t m = groupTop;
+            for (size_t k = 0; k < l; ++k)
+                if (cand[k].second < m) { keep[k] = true; m = cand[k].second; }
+            m = next;
+            for (size_t k = l; k-- > 0; )
+                if (cand[k].second < m) { keep[k] = true; m = cand[k].second; }
+            uint64_t cnt = 0;
+            for (size_t k = 0; k < l; ++k) cnt += keep[k];
+            buf.clear();
+            putVarint(buf, groupTop);
+            putVarint(buf, cnt);
+            uint64_t prev = 0;
+            for (size_t k = 0; k < l; ++k)
+                if (keep[k]) { putVarint(buf, cand[k].first - prev); putVarint(buf, cand[k].second); prev = cand[k].first; }
+            minimaPairs += cnt;
+            ++minimaRecords;
+            pending = false;
+            cand.clear();
+            return std::fwrite(buf.data(), 1, buf.size(), fm) == buf.size();
+        }
+
+        // Internal run g's record, whose payload starts at d[p] (after the key).
+        bool record(uint64_t g, const std::vector<unsigned char>& d, size_t p) {
+            const size_t minimaStart = p;
+            uint64_t top, cnt;
+            if (!parseVarint(d, p, top) || !parseVarint(d, p, cnt)) return false;
+            const size_t pairsStart = p;
+            uint64_t x;
+            for (uint64_t k = 0; k < 2 * cnt; ++k)
+                if (!parseVarint(d, p, x)) return false;
+            const size_t minimaEnd = p;
+            uint64_t head = 0, tail = 0;
+            if (fp && (!parseVarint(d, p, head) || !parseVarint(d, p, tail))) return false;
+
+            // Which group, if any, holds run g, and whether g is its first or last piece.
+            const Group* grp = (group < w.groups_.size() && g >= w.groups_[group].first) ? &w.groups_[group] : nullptr;
+            const uint64_t piece = grp ? g - grp->first : 0;
+            const bool last = grp && piece + 1 == grp->pieces;
+
+            if (fp) {
+                if (!grp || grp->separator) {
+                    if (!writePhi(head, tail, top)) return false;
+                } else if (piece == 0) {
+                    phiHead = head;
+                    phiTop = top;
+                } else if (last && !writePhi(phiHead, tail, phiTop)) {
+                    return false;
+                }
+            }
+            if (fm) {
+                if (pending && !writeGroup(top)) return false;
+                if (!grp) {
+                    minimaPairs += cnt;
+                    ++minimaRecords;
+                    if (std::fwrite(d.data() + minimaStart, 1, minimaEnd - minimaStart, fm) != minimaEnd - minimaStart)
+                        return false;
+                } else {
+                    if (grp->separator && cnt != 0) return false;   // a separator run has length 1
+                    if (piece == 0) {
+                        groupTop = top;
+                        groupBase = 0;
+                    } else {
+                        cand.emplace_back(groupBase, top);
+                    }
+                    size_t q = pairsStart;
+                    uint64_t off = 0, gap, v;
+                    for (uint64_t k = 0; k < cnt; ++k) {
+                        parseVarint(d, q, gap);
+                        parseVarint(d, q, v);
+                        off += gap;
+                        cand.emplace_back(groupBase + off, v);
+                    }
+                    groupBase += grp->separator ? 1 : grp->lens[piece];
+                    if (last) pending = true;
+                }
+            }
+            if (last) ++group;
+            return true;
+        }
+
+        // Writes any pending group and both headers, and closes the files.
+        bool close(uint64_t runs) {
+            bool ok = true;
+            if (fm && pending) ok = writeGroup(INF);
+            if (group != w.groups_.size() || !cand.empty()) ok = false;
+            if (fm && ok) {
+                unsigned char h[HEADER_BYTES] = {0};
+                static const unsigned char MAGIC[8] = {0x93, 'T', 'L', 'M', 'S', 'M', 0x00, 0x01};
+                std::memcpy(h, MAGIC, 8);
+                h[8] = FLAG_LE | (w.inputRuns_ ? FLAG_INPUT_RUNS : 0) | (w.numberingDiffers_ ? FLAG_NUMBERING_DIFFERS : 0);
+                std::memcpy(h + 16, &minimaRecords, 8);
+                std::memcpy(h + 24, &totalLen, 8);
+                std::memcpy(h + 32, &minimaPairs, 8);
+                std::memcpy(h + 40, &w.inputRuns_, 8);
+                ok = std::fseek(fm, 0, SEEK_SET) == 0 && std::fwrite(h, 1, HEADER_BYTES, fm) == HEADER_BYTES;
+            }
+            if (fp && ok) {
+                unsigned char h[HEADER_BYTES] = {0};
+                static const unsigned char MAGIC[8] = {0x93, 'T', 'L', 'P', 'H', 'I', 0x00, 0x01};
+                std::memcpy(h, MAGIC, 8);
+                h[8] = FLAG_LE;
+                h[9] = static_cast<unsigned char>(width);
+                uint64_t merged = runs;
+                for (const Group& s : w.groups_) merged -= s.pieces - 1;
+                std::memcpy(h + 16, &phiRecords, 8);
+                std::memcpy(h + 24, &totalLen, 8);
+                std::memcpy(h + 32, &merged, 8);
+                ok = std::fseek(fp, 0, SEEK_SET) == 0 && std::fwrite(h, 1, HEADER_BYTES, fp) == HEADER_BYTES;
+            }
+            if (fm && std::fclose(fm) != 0) ok = false;
+            if (fp && std::fclose(fp) != 0) ok = false;
+            fm = fp = nullptr;
+            return ok;
+        }
+    };
 
     // Sequential buffered byte reader over a spill file.
     struct ByteReader {
@@ -302,11 +517,13 @@ private:
         }
     };
 
-    // Copies a record payload (top, count, count pairs) from in to rec.
-    static bool copyPayload(ByteReader& in, std::string& rec) {
+    // Copies a record payload (top, count, count pairs, and with phi the head
+    // and tail positions) from in to rec.
+    bool copyPayload(ByteReader& in, std::string& rec) const {
         uint64_t top, cnt, x;
         if (!in.varint(top, &rec) || !in.varint(cnt, &rec)) return false;
-        for (uint64_t k = 0; k < 2 * cnt; ++k)
+        const uint64_t more = 2 * cnt + (wantPhi() ? 2 : 0);
+        for (uint64_t k = 0; k < more; ++k)
             if (!in.varint(x, &rec)) return false;
         return true;
     }
@@ -324,10 +541,11 @@ private:
         return false;
     }
 
-    static bool skipPayload(const std::vector<unsigned char>& d, size_t& pos) {
+    bool skipPayload(const std::vector<unsigned char>& d, size_t& pos) const {
         uint64_t top, cnt, x;
         if (!parseVarint(d, pos, top) || !parseVarint(d, pos, cnt)) return false;
-        for (uint64_t k = 0; k < 2 * cnt; ++k)
+        const uint64_t more = 2 * cnt + (wantPhi() ? 2 : 0);
+        for (uint64_t k = 0; k < more; ++k)
             if (!parseVarint(d, pos, x)) return false;
         return true;
     }
@@ -2428,6 +2646,8 @@ class TeraLCP {
         #pragma omp parallel for schedule(dynamic, 1)
         for (uint64_t block = 0; block < numBlocks; ++block) {
             MsMinimaWriter::Scratch* ms = minima ? &minima->scratch(omp_get_thread_num()) : nullptr;
+            // Only the minima need the interior LCP values of a run.
+            const bool collect = ms && minima->wantMinima();
             const uint64_t start = block*blockSize;
             const uint64_t end = std::min(runs, start + blockSize);
             const uint64_t safeStart = start + dangerousInts,
@@ -2448,9 +2668,12 @@ class TeraLCP {
                 // visits run i from its bottom row up to its top row. The interval
                 // holding BWT row 0 visits the last run, whose next top is +infinity.
                 uint64_t sufMin = 0;
-                if (ms) sufMin = (run == intAtTopBWT) ? static_cast<uint64_t>(MsMinimaWriter::INF) : PLCPsamples[run];
+                if (collect) sufMin = (run == intAtTopBWT) ? static_cast<uint64_t>(MsMinimaWriter::INF) : PLCPsamples[run];
+                // The first step reaches the run's bottom row, the last its top row.
+                uint64_t tailSA = 0;
                 do {
                     p = Phi.map(p);
+                    if (runLen == 0) tailSA = p.position;
                     //std::cout << "suff " << p.position << std::endl;
                     //std::cout << "lcp " << PLCP(p) << std::endl;
                     ++runLen;
@@ -2465,14 +2688,14 @@ class TeraLCP {
                         minLCPLocLast = runLen;
                     }
                     topVal = l; // last iteration is the run's top row (offset 0)
-                    if (ms && p.offset) {
+                    if (collect && p.offset) {
                         // Interior row, runLen steps from the bottom of the run.
                         if (l < sufMin) { ms->suf.emplace_back(runLen, l); sufMin = l; }
                         while (!ms->stk.empty() && ms->stk.back().second >= l) ms->stk.pop_back();
                         ms->stk.emplace_back(runLen, l);
                     }
                 } while (p.offset);
-                if (ms) minima->emit(*ms, run, topVal, runLen);
+                if (ms) minima->emit(*ms, run, topVal, runLen, p.position, tailSA);
                 assert(minLCPLoc != static_cast<uint64_t>(-1));
                 minLCPLoc = runLen - minLCPLoc;
                 //std::cout << "runLen " << runLen << " newmiNLCPLoc " << minLCPLoc << std::endl;
